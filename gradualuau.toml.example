@@ -1,0 +1,10 @@
+[package]
+name = "ExampleProject"
+
+[build]
+optimization = "debug"
+
+[target]
+windows = true
+linux = true
+macos = true

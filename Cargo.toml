@@ -1,12 +1,8 @@
 [workspace]
-members = [
-    "crates/gluac",
-    "crates/gluauc",
-]
+members = ["compiler"]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/AntonioGames19/GraduaLuau"
-
