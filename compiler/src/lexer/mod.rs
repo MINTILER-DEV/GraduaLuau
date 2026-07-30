@@ -1,15 +1,74 @@
-use crate::source::{FileId, SourceFile, SourceSpan};
+use crate::source::{SourceFile, SourceSpan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenKind {
     Identifier(String),
-    Keyword(String),
-    Number(String),
+    // Keywords
+    If,
+    Then,
+    Else,
+    ElseIf,
+    End,
+    While,
+    Do,
+    For,
+    In,
+    Repeat,
+    Until,
+    Break,
+    Local,
+    Function,
+    Return,
+    And,
+    Or,
+    Not,
+    Type,
+    Export,
+    Any,
+    Never,
+    Typeof,
+    NumberLiteral(String),
     StringLiteral(String),
-    Boolean(bool),
+    True,
+    False,
     Nil,
-    Operator(String),
-    Punct(char),
+
+    // Arithmetic
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Caret,
+
+    // Comparison / assignment
+    Equal,
+    EqualEqual,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+
+    // Compound assignment
+    PlusEqual,
+    MinusEqual,
+    StarEqual,
+    SlashEqual,
+    PercentEqual,
+
+    // Delimiters
+    LeftParen,
+    RightParen,
+    LeftBracket,
+    RightBracket,
+    LeftBrace,
+    RightBrace,
+    Comma,
+    Dot,
+    Colon,
+    Semicolon,
+
     EOF,
     Unknown(char),
 }
@@ -66,8 +125,8 @@ impl<'a> Lexer<'a> {
                 // identifiers or keywords
                 if is_alpha(b) || b == b'_' {
                     let s = self.read_identifier();
-                    let kind = if is_keyword(&s) {
-                        TokenKind::Keyword(s.clone())
+                    let kind = if let Some(kw) = keyword_token(&s) {
+                        kw
                     } else {
                         TokenKind::Identifier(s.clone())
                     };
@@ -76,7 +135,7 @@ impl<'a> Lexer<'a> {
                 } else if is_digit(b) {
                     let s = self.read_number();
                     let end = self.pos;
-                    Token { kind: TokenKind::Number(s), span: self.make_span(start, end) }
+                    Token { kind: TokenKind::NumberLiteral(s), span: self.make_span(start, end) }
                 } else if b == b'"' {
                     // string literal
                     self.advance(); // consume '"'
@@ -86,15 +145,32 @@ impl<'a> Lexer<'a> {
                 } else {
                     // operators and punctuation
                     // two-char operators
-                    if let Some(p) = self.match_two_char_op(b) {
+                    if let Some(kind_op) = self.match_two_char_op(b) {
                         let end = self.pos;
-                        Token { kind: TokenKind::Operator(p), span: self.make_span(start, end) }
+                        Token { kind: kind_op, span: self.make_span(start, end) }
                     } else {
                         // single char
                         let ch = self.advance().unwrap() as char;
                         let kind = match ch {
-                            '+' | '-' | '*' | '/' | '%' | '^' | '=' | '<' | '>' => TokenKind::Operator(ch.to_string()),
-                            '(' | ')' | '{' | '}' | '[' | ']' | ',' | ';' | ':' | '.' => TokenKind::Punct(ch),
+                            '+' => TokenKind::Plus,
+                            '-' => TokenKind::Minus,
+                            '*' => TokenKind::Star,
+                            '/' => TokenKind::Slash,
+                            '%' => TokenKind::Percent,
+                            '^' => TokenKind::Caret,
+                            '=' => TokenKind::Equal,
+                            '<' => TokenKind::Less,
+                            '>' => TokenKind::Greater,
+                            '(' => TokenKind::LeftParen,
+                            ')' => TokenKind::RightParen,
+                            '{' => TokenKind::LeftBrace,
+                            '}' => TokenKind::RightBrace,
+                            '[' => TokenKind::LeftBracket,
+                            ']' => TokenKind::RightBracket,
+                            ',' => TokenKind::Comma,
+                            ';' => TokenKind::Semicolon,
+                            ':' => TokenKind::Colon,
+                            '.' => TokenKind::Dot,
                             _ => TokenKind::Unknown(ch),
                         };
                         let end = self.pos;
@@ -179,12 +255,17 @@ impl<'a> Lexer<'a> {
         out
     }
 
-    fn match_two_char_op(&mut self, b: u8) -> Option<String> {
+    fn match_two_char_op(&mut self, b: u8) -> Option<TokenKind> {
         match (b, self.peek_byte()) {
-            (b'=', Some(b'=')) => { self.advance(); self.advance(); Some(String::from("==")) }
-            (b'~', Some(b'=')) => { self.advance(); self.advance(); Some(String::from("~=")) }
-            (b'<', Some(b'=')) => { self.advance(); self.advance(); Some(String::from("<=")) }
-            (b'>', Some(b'=')) => { self.advance(); self.advance(); Some(String::from(">=")) }
+            (b'=', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::EqualEqual) }
+            (b'~', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::NotEqual) }
+            (b'<', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::LessEqual) }
+            (b'>', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::GreaterEqual) }
+            (b'+', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::PlusEqual) }
+            (b'-', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::MinusEqual) }
+            (b'*', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::StarEqual) }
+            (b'/', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::SlashEqual) }
+            (b'%', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::PercentEqual) }
             _ => None,
         }
     }
@@ -195,7 +276,44 @@ fn is_digit(b: u8) -> bool { (b'0'..=b'9').contains(&b) }
 fn is_whitespace(b: u8) -> bool { b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' }
 
 fn is_keyword(s: &str) -> bool {
-    matches!(s, "local" | "if" | "else" | "while" | "for" | "function" | "return" | "require" | "break" | "continue" | "true" | "false" | "nil")
+    // simple check; detailed mapping handled by `keyword_token`
+    matches!(s,
+        "and"|"break"|"do"|"else"|"elseif"|"end"|"false"|"for"|"function"|"if"|"in"|
+        "local"|"nil"|"not"|"or"|"repeat"|"return"|"then"|"true"|"until"|"while"|
+        "type"|"export"|"any"|"never"|"typeof"
+    )
+}
+
+fn keyword_token(s: &str) -> Option<TokenKind> {
+    Some(match s {
+        "if" => TokenKind::If,
+        "then" => TokenKind::Then,
+        "else" => TokenKind::Else,
+        "elseif" => TokenKind::ElseIf,
+        "end" => TokenKind::End,
+        "while" => TokenKind::While,
+        "do" => TokenKind::Do,
+        "for" => TokenKind::For,
+        "in" => TokenKind::In,
+        "repeat" => TokenKind::Repeat,
+        "until" => TokenKind::Until,
+        "break" => TokenKind::Break,
+        "local" => TokenKind::Local,
+        "function" => TokenKind::Function,
+        "return" => TokenKind::Return,
+        "and" => TokenKind::And,
+        "or" => TokenKind::Or,
+        "not" => TokenKind::Not,
+        "type" => TokenKind::Type,
+        "export" => TokenKind::Export,
+        "any" => TokenKind::Any,
+        "never" => TokenKind::Never,
+        "typeof" => TokenKind::Typeof,
+        "true" => TokenKind::True,
+        "false" => TokenKind::False,
+        "nil" => TokenKind::Nil,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -212,22 +330,22 @@ mod tests {
 
         let mut lex = Lexer::new(file);
         let t1 = lex.next_token();
-        assert!(matches!(t1.kind, TokenKind::Keyword(ref k) if k == "local"));
+        assert!(matches!(t1.kind, TokenKind::Local));
         let t2 = lex.next_token();
         assert!(matches!(t2.kind, TokenKind::Identifier(ref s) if s == "x"));
         let t3 = lex.next_token();
-        assert!(matches!(t3.kind, TokenKind::Operator(ref s) if s == "="));
+        assert!(matches!(t3.kind, TokenKind::Equal));
         let t4 = lex.next_token();
-        assert!(matches!(t4.kind, TokenKind::Number(ref s) if s == "42"));
+        assert!(matches!(t4.kind, TokenKind::NumberLiteral(ref s) if s == "42"));
         // print
         let t5 = lex.next_token();
         assert!(matches!(t5.kind, TokenKind::Identifier(ref s) if s == "print"));
         let t6 = lex.next_token();
-        assert!(matches!(t6.kind, TokenKind::Punct('(')));
+        assert!(matches!(t6.kind, TokenKind::LeftParen));
         let t7 = lex.next_token();
         assert!(matches!(t7.kind, TokenKind::Identifier(ref s) if s == "x"));
         let t8 = lex.next_token();
-        assert!(matches!(t8.kind, TokenKind::Punct(')')));
+        assert!(matches!(t8.kind, TokenKind::RightParen));
         let t9 = lex.next_token();
         assert!(matches!(t9.kind, TokenKind::EOF));
     }
