@@ -373,13 +373,14 @@ fn render_source_label(output: &mut String, sources: &SourceManager, label: &Dia
     let column = location.column.max(1);
     let underline_width = underline_width(label.span, file);
 
+    let display_path = path_display(file.path());
     output.push_str(&format!(
         "\n --> {}:{}:{}\n",
-        file.path().display(),
+        display_path,
         location.line,
         location.column
     ));
-    output.push_str(&format!("{:>width$} |\n", "", width = line_number_width));
+    output.push_str(&format!("{:>width$}|\n", "", width = line_number_width));
     output.push_str(&format!(
         "{:>width$} | {}\n",
         location.line,
@@ -387,7 +388,7 @@ fn render_source_label(output: &mut String, sources: &SourceManager, label: &Dia
         width = line_number_width
     ));
     output.push_str(&format!(
-        "{:>width$} | {}{}",
+        "{:>width$}| {}{}",
         "",
         " ".repeat(column.saturating_sub(1)),
         "^".repeat(underline_width),
@@ -417,14 +418,21 @@ fn render_related_span(output: &mut String, sources: &SourceManager, span: Sourc
     };
 
     match file.location(span.start()) {
-        Some(location) => output.push_str(&format!(
-            " --> {}:{}:{}\n",
-            file.path().display(),
-            location.line,
-            location.column
-        )),
+        Some(location) => {
+            let display_path = path_display(file.path());
+            output.push_str(&format!(
+                " --> {}:{}:{}\n",
+                display_path,
+                location.line,
+                location.column
+            ));
+        }
         None => output.push_str(" --> <invalid source location>\n"),
     }
+}
+
+fn path_display(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn render_missing_file(output: &mut String, file_id: FileId) {

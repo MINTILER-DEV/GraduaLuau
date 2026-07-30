@@ -1,36 +1,123 @@
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Default)]
 pub struct SourceManager {
     files: Vec<SourceFile>,
+    // map normalized paths to file ids to prevent duplicate loads
+    path_map: HashMap<PathBuf, FileId>,
+    // module request cache (e.g. "./math" -> FileId)
+    module_cache: HashMap<String, FileId>,
+    // stack of paths currently being resolved (for cycle detection)
+    resolving: Vec<PathBuf>,
 }
 
 impl SourceManager {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            files: Vec::new(),
+            path_map: HashMap::new(),
+            module_cache: HashMap::new(),
+            resolving: Vec::new(),
+        }
     }
 
+    /// Load a file from disk. This will normalize the path, prevent
+    /// duplicate loads, and ensure the `.glu` extension when missing.
     pub fn load_file(&mut self, path: impl AsRef<Path>) -> Result<FileId, SourceError> {
-        let path = path.as_ref().to_path_buf();
-        let text = fs::read_to_string(&path).map_err(|source| SourceError::Read {
-            path: path.clone(),
+        let mut candidate = path.as_ref().to_path_buf();
+
+        // If the provided path has no extension, assume `.glu`.
+        if candidate.extension().is_none() {
+            candidate.set_extension("glu");
+        }
+
+        let norm = normalize_path(&candidate);
+
+        if let Some(&id) = self.path_map.get(&norm) {
+            return Ok(id);
+        }
+
+        let text = fs::read_to_string(&candidate).map_err(|source| SourceError::Read {
+            path: candidate.clone(),
             source,
         })?;
 
-        Ok(self.add_file(path, text))
+        Ok(self.add_file(candidate, text))
     }
 
+    /// Add a file into the manager. If the normalized path already exists,
+    /// the existing `FileId` is returned.
     pub fn add_file(&mut self, path: PathBuf, text: String) -> FileId {
+        let norm = normalize_path(&path);
+
+        if let Some(&id) = self.path_map.get(&norm) {
+            return id;
+        }
+
         let id = FileId(self.files.len());
-        self.files.push(SourceFile::new(id, path, text));
+        self.files.push(SourceFile::new(id, norm.clone(), text));
+        self.path_map.insert(norm, id);
         id
     }
 
     pub fn get(&self, id: FileId) -> Option<&SourceFile> {
         self.files.get(id.0)
+    }
+
+    pub fn get_by_path(&self, path: impl AsRef<Path>) -> Option<&SourceFile> {
+        let norm = normalize_path(path.as_ref());
+        self.path_map.get(&norm).and_then(|id| self.get(*id))
+    }
+
+    /// Resolve a module request from a `current` file. Only relative
+    /// resolution is supported (requests starting with `.`).
+    pub fn resolve_module(&mut self, current: FileId, module: &str) -> Result<FileId, SourceError> {
+        if !module.starts_with('.') {
+            return Err(SourceError::UnsupportedModule(module.to_string()));
+        }
+
+        let current_file = self.get(current).ok_or_else(|| SourceError::NotFound(PathBuf::new()))?;
+        let parent = current_file.path.parent().unwrap_or(Path::new(""));
+
+        let mut candidate = parent.join(module);
+        if candidate.extension().is_none() {
+            candidate.set_extension("glu");
+        }
+
+        let norm = normalize_path(&candidate);
+
+        // Cycle detection: if we're already resolving this path, report a cycle
+        if self.resolving.iter().any(|p| p == &norm) {
+            let mut chain = self.resolving.clone();
+            chain.push(norm.clone());
+            return Err(SourceError::Circular(chain));
+        }
+
+        if let Some(&id) = self.path_map.get(&norm) {
+            // cache the module request for quick future lookups
+            self.module_cache.insert(module.to_string(), id);
+            return Ok(id);
+        }
+
+        // attempt to read from disk
+        self.resolving.push(norm.clone());
+        let text = fs::read_to_string(&candidate).map_err(|source| {
+            self.resolving.pop();
+            SourceError::Read {
+                path: candidate.clone(),
+                source,
+            }
+        })?;
+
+        let id = self.add_file(candidate, text);
+        self.resolving.pop();
+        self.module_cache.insert(module.to_string(), id);
+
+        Ok(id)
     }
 
     pub fn len(&self) -> usize {
@@ -179,6 +266,9 @@ impl SourceFile {
 #[derive(Debug)]
 pub enum SourceError {
     Read { path: PathBuf, source: io::Error },
+    NotFound(PathBuf),
+    UnsupportedModule(String),
+    Circular(Vec<PathBuf>),
 }
 
 impl Display for SourceError {
@@ -186,6 +276,15 @@ impl Display for SourceError {
         match self {
             Self::Read { path, source } => {
                 write!(formatter, "failed to read '{}': {source}", path.display())
+            }
+            Self::NotFound(path) => write!(formatter, "source file not found: {}", path.display()),
+            Self::UnsupportedModule(m) => write!(formatter, "unsupported module request: {m}"),
+            Self::Circular(chain) => {
+                write!(formatter, "circular module resolution:")?;
+                for p in chain {
+                    write!(formatter, " {}", p.display())?;
+                }
+                Ok(())
             }
         }
     }
@@ -203,6 +302,34 @@ fn line_offsets(text: &str) -> Vec<usize> {
     }
 
     offsets
+}
+
+/// Lexically normalize a path by collapsing `.` and `..` components.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
+
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => components.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if components.is_empty() {
+                    components.push(comp.as_os_str());
+                } else {
+                    // pop last non-root component if possible
+                    components.pop();
+                }
+            }
+            Component::Normal(c) => components.push(c),
+        }
+    }
+
+    let mut out = PathBuf::new();
+    for c in components {
+        out.push(c);
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -235,5 +362,25 @@ mod tests {
         assert_eq!(location.line, 2);
         assert_eq!(location.column, 1);
         assert_eq!(file.line_text(2), Some("print(x)"));
+    }
+
+    #[test]
+    fn prevents_duplicate_loads() {
+        let mut manager = SourceManager::new();
+        let id1 = manager.add_file(PathBuf::from("src/math.glu"), String::from("local a = 1"));
+        let id2 = manager.add_file(PathBuf::from("src/./math.glu"), String::from("local a = 1"));
+
+        assert_eq!(id1, id2);
+        assert_eq!(manager.len(), 1);
+    }
+
+    #[test]
+    fn resolves_relative_module() {
+        let mut manager = SourceManager::new();
+        let main = manager.add_file(PathBuf::from("src/main.glu"), String::from("require('./math')"));
+        let math = manager.add_file(PathBuf::from("src/math.glu"), String::from("local a = 1"));
+
+        let resolved = manager.resolve_module(main, "./math").expect("should resolve module");
+        assert_eq!(resolved, math);
     }
 }
