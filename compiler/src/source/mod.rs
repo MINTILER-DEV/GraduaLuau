@@ -133,6 +133,10 @@ impl SourceManager {
 pub struct FileId(usize);
 
 impl FileId {
+    pub fn new(index: usize) -> Self {
+        Self(index)
+    }
+
     pub fn index(self) -> usize {
         self.0
     }
