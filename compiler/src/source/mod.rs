@@ -45,6 +45,57 @@ impl SourceManager {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileId(usize);
 
+impl FileId {
+    pub fn index(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceSpan {
+    file_id: FileId,
+    start: usize,
+    end: usize,
+}
+
+impl SourceSpan {
+    pub fn new(file_id: FileId, start: usize, end: usize) -> Self {
+        Self {
+            file_id,
+            start,
+            end: end.max(start),
+        }
+    }
+
+    pub fn file_id(self) -> FileId {
+        self.file_id
+    }
+
+    pub fn start(self) -> usize {
+        self.start
+    }
+
+    pub fn end(self) -> usize {
+        self.end
+    }
+
+    pub fn len(self) -> usize {
+        self.end.saturating_sub(self.start)
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLocation {
+    pub file_id: FileId,
+    pub offset: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceFile {
     id: FileId,
@@ -83,6 +134,45 @@ impl SourceFile {
 
     pub fn line_start(&self, zero_based_line: usize) -> Option<usize> {
         self.line_offsets.get(zero_based_line).copied()
+    }
+
+    pub fn location(&self, offset: usize) -> Option<SourceLocation> {
+        if offset > self.text.len() {
+            return None;
+        }
+
+        let line_index = match self.line_offsets.binary_search(&offset) {
+            Ok(index) => index,
+            Err(index) => index.saturating_sub(1),
+        };
+        let line_start = self.line_offsets[line_index];
+
+        Some(SourceLocation {
+            file_id: self.id,
+            offset,
+            line: line_index + 1,
+            column: offset.saturating_sub(line_start) + 1,
+        })
+    }
+
+    pub fn line_text(&self, one_based_line: usize) -> Option<&str> {
+        let line_index = one_based_line.checked_sub(1)?;
+        let start = *self.line_offsets.get(line_index)?;
+        let end = self.line_end(one_based_line)?;
+
+        Some(self.text[start..end].trim_end_matches(['\r', '\n']))
+    }
+
+    pub fn line_end(&self, one_based_line: usize) -> Option<usize> {
+        let line_index = one_based_line.checked_sub(1)?;
+        let start = *self.line_offsets.get(line_index)?;
+        let next_start = self.line_offsets.get(line_index + 1).copied();
+
+        Some(match next_start {
+            Some(next_start) => next_start,
+            None => self.text.len(),
+        }
+        .max(start))
     }
 }
 
@@ -130,5 +220,20 @@ mod tests {
         assert_eq!(file.line_start(0), Some(0));
         assert_eq!(file.line_start(1), Some(2));
         assert_eq!(file.line_start(2), Some(4));
+    }
+
+    #[test]
+    fn resolves_line_and_column_locations() {
+        let mut manager = SourceManager::new();
+        let id = manager.add_file(
+            PathBuf::from("main.glu"),
+            String::from("local x = 1\nprint(x)"),
+        );
+        let file = manager.get(id).expect("source file should exist");
+        let location = file.location(12).expect("location should resolve");
+
+        assert_eq!(location.line, 2);
+        assert_eq!(location.column, 1);
+        assert_eq!(file.line_text(2), Some("print(x)"));
     }
 }
