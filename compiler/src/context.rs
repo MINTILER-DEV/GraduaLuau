@@ -1,5 +1,8 @@
+use std::path::PathBuf;
+
 use crate::diagnostics::DiagnosticBag;
 use crate::source::SourceManager;
+use crate::utils::LogLevel;
 
 #[derive(Debug)]
 pub struct CompilerContext {
@@ -18,15 +21,29 @@ impl CompilerContext {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompilerOptions {
-    pub mode: BuildMode,
+    pub build_mode: BuildMode,
+    pub target_triple: String,
+    pub output_path: PathBuf,
+    pub debug_symbols: bool,
+    pub warnings: WarningMode,
+    pub runtime_mode: RuntimeMode,
+    pub emit: EmitOptions,
+    pub log_level: Option<LogLevel>,
 }
 
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
-            mode: BuildMode::Debug,
+            build_mode: BuildMode::Debug,
+            target_triple: default_target_triple(),
+            output_path: PathBuf::from("build"),
+            debug_symbols: true,
+            warnings: WarningMode::Default,
+            runtime_mode: RuntimeMode::Native,
+            emit: EmitOptions::default(),
+            log_level: None,
         }
     }
 }
@@ -35,7 +52,6 @@ impl Default for CompilerOptions {
 pub enum BuildMode {
     Debug,
     Release,
-    Check,
 }
 
 impl BuildMode {
@@ -43,7 +59,51 @@ impl BuildMode {
         match self {
             Self::Debug => "debug build",
             Self::Release => "release build",
-            Self::Check => "check mode",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarningMode {
+    Default,
+    Deny,
+    Allow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeMode {
+    Native,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct EmitOptions {
+    pub llvm: bool,
+    pub hir: bool,
+    pub mir: bool,
+    pub ast: bool,
+    pub tokens: bool,
+}
+
+fn default_target_triple() -> String {
+    if cfg!(all(target_os = "windows", target_env = "msvc")) {
+        return format!("{}-pc-windows-msvc", std::env::consts::ARCH);
+    }
+
+    if cfg!(all(target_os = "windows", target_env = "gnu")) {
+        return format!("{}-pc-windows-gnu", std::env::consts::ARCH);
+    }
+
+    if cfg!(target_os = "macos") {
+        return format!("{}-apple-darwin", std::env::consts::ARCH);
+    }
+
+    if cfg!(target_os = "linux") {
+        return format!("{}-unknown-linux-gnu", std::env::consts::ARCH);
+    }
+
+    format!(
+        "{}-unknown-{}",
+        std::env::consts::ARCH,
+        std::env::consts::OS
+    )
 }

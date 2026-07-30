@@ -1,3 +1,4 @@
+use std::fmt::{Display, Formatter};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -89,6 +90,18 @@ impl SourceFile {
 pub enum SourceError {
     Read { path: PathBuf, source: io::Error },
 }
+
+impl Display for SourceError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read { path, source } => {
+                write!(formatter, "failed to read '{}': {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for SourceError {}
 
 fn line_offsets(text: &str) -> Vec<usize> {
     let mut offsets = vec![0];

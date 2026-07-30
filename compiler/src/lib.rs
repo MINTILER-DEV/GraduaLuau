@@ -7,6 +7,7 @@ pub mod lexer;
 pub mod llvm;
 pub mod mir;
 pub mod parser;
+pub mod pipeline;
 pub mod runtime;
 pub mod semantic;
 pub mod source;
