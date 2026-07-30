@@ -1,25 +1,38 @@
-use crate::lexer::TokenKind;
-use crate::source::SourceSpan;
+use crate::diagnostics::Diagnostic;
+use crate::lexer::Token;
+use crate::parser::cursor::Cursor;
 
 pub struct Parser<'a> {
-    // placeholder fields
-    tokens: Vec<TokenKind>,
-    index: usize,
-    diagnostics: Vec<String>,
-    _marker: std::marker::PhantomData<&'a ()>,
+    cursor: Cursor<'a>,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(tokens: Vec<TokenKind>) -> Self {
-        Self { tokens, index: 0, diagnostics: Vec::new(), _marker: Default::default() }
+    pub fn new(tokens: &'a [Token]) -> Self {
+        Self { cursor: Cursor::new(tokens), diagnostics: Vec::new() }
+    }
+
+    pub fn current(&self) -> Option<&'a Token> {
+        self.cursor.current()
+    }
+
+    pub fn peek(&self) -> Option<&'a Token> {
+        self.cursor.peek()
+    }
+
+    pub fn advance(&mut self) {
+        self.cursor.advance();
     }
 
     pub fn parse_program(&mut self) {
-        // placeholder: consume tokens to exercise scaffolding
-        while self.index < self.tokens.len() {
-            self.index += 1;
+        // consume tokens until EOF — real implementation will build AST
+        while let Some(tok) = self.current() {
+            if matches!(tok.kind, crate::lexer::TokenKind::EOF) {
+                break;
+            }
+            self.advance();
         }
     }
 
-    pub fn diagnostics(&self) -> &[String] { &self.diagnostics }
+    pub fn diagnostics(&self) -> &[Diagnostic] { &self.diagnostics }
 }
