@@ -9,4 +9,15 @@ repository.workspace = true
 name = "gluauc"
 path = "src/main.rs"
 
+[[test]]
+name = "lexer"
+path = "../tests/lexer/mod.rs"
+
+[[test]]
+name = "lexer_fuzz"
+path = "../tests/lexer_fuzz.rs"
+
 [dependencies]
+
+[dev-dependencies]
+criterion = "0.4"
