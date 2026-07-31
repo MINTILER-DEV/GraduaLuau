@@ -66,6 +66,7 @@ pub enum TokenKind {
     RightBrace,
     Comma,
     Dot,
+    DotDot,
     Colon,
     Semicolon,
 
@@ -266,6 +267,7 @@ impl<'a> Lexer<'a> {
             (b'*', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::StarEqual) }
             (b'/', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::SlashEqual) }
             (b'%', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::PercentEqual) }
+            (b'.', Some(b'.')) => { self.advance(); self.advance(); Some(TokenKind::DotDot) }
             _ => None,
         }
     }

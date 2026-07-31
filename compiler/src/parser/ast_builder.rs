@@ -36,6 +36,10 @@ pub enum ExpressionKind {
     StringLiteral(String),
     BooleanLiteral(bool),
     Nil,
+    Unary {
+        operator: String,
+        operand: Box<Expression>,
+    },
     Binary {
         left: Box<Expression>,
         operator: String,
@@ -55,6 +59,6 @@ pub enum AstNode {
     Error,
 }
 
-pub fn make_program(span: SourceSpan) -> AstNode {
-    AstNode::Program(Program { statements: Vec::new(), span })
+pub fn make_program(statements: Vec<Statement>, span: SourceSpan) -> AstNode {
+    AstNode::Program(Program { statements, span })
 }
