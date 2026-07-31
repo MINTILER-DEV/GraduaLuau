@@ -16,10 +16,17 @@ pub struct Statement {
 pub enum StatementKind {
     Empty,
     Expression(Expression),
-    Return(Option<Expression>),
+    Return(Option<Vec<Expression>>),
+    Break,
+    Continue,
     Local {
-        name: String,
-        initializer: Option<Expression>,
+        names: Vec<String>,
+        initializers: Vec<Expression>,
+    },
+    Assignment {
+        targets: Vec<Expression>,
+        values: Vec<Expression>,
+        operator: String,
     },
 }
 

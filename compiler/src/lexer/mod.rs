@@ -16,6 +16,7 @@ pub enum TokenKind {
     Repeat,
     Until,
     Break,
+    Continue,
     Local,
     Function,
     Return,
@@ -314,6 +315,7 @@ fn keyword_token(s: &str) -> Option<TokenKind> {
         "true" => TokenKind::True,
         "false" => TokenKind::False,
         "nil" => TokenKind::Nil,
+        "continue" => TokenKind::Continue,
         _ => return None,
     })
 }

@@ -40,7 +40,7 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            let statement = self.parse_expression_statement();
+            let statement = self.parse_statement();
             end = statement.span.end();
             statements.push(statement);
 
@@ -58,10 +58,126 @@ impl<'a> Parser<'a> {
 
     pub fn diagnostics(&self) -> &[Diagnostic] { &self.diagnostics }
 
-    fn parse_expression_statement(&mut self) -> Statement {
-        let expression = self.parse_expression();
-        let span = expression.span;
-        Statement { kind: StatementKind::Expression(expression), span }
+    fn parse_statement(&mut self) -> Statement {
+        match self.current().map(|tok| &tok.kind) {
+            Some(TokenKind::Local) => self.parse_local_statement(),
+            Some(TokenKind::Return) => self.parse_return_statement(),
+            Some(TokenKind::Break) => self.parse_break_statement(),
+            Some(TokenKind::Continue) => self.parse_continue_statement(),
+            _ => self.parse_assignment_or_expression_statement(),
+        }
+    }
+
+    fn parse_local_statement(&mut self) -> Statement {
+        self.advance();
+        let mut names = Vec::new();
+
+        while let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
+            names.push(name);
+            self.advance();
+            if !matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Comma)) {
+                break;
+            }
+            self.advance();
+        }
+
+        let mut initializers = Vec::new();
+        if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Equal)) {
+            self.advance();
+            initializers = self.parse_expression_list();
+        }
+
+        let span = if let Some(last) = initializers.last() {
+            last.span
+        } else if let Some(last_name) = names.last() {
+            let last_span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+            last_span
+        } else {
+            self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0))
+        };
+
+        Statement {
+            kind: StatementKind::Local { names, initializers },
+            span,
+        }
+    }
+
+    fn parse_return_statement(&mut self) -> Statement {
+        self.advance();
+        let values = if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Semicolon) | Some(TokenKind::EOF)) {
+            Vec::new()
+        } else {
+            self.parse_expression_list()
+        };
+        let span = if let Some(last) = values.last() {
+            last.span
+        } else {
+            self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0))
+        };
+        Statement { kind: StatementKind::Return(Some(values)), span }
+    }
+
+    fn parse_break_statement(&mut self) -> Statement {
+        let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+        self.advance();
+        Statement { kind: StatementKind::Break, span }
+    }
+
+    fn parse_continue_statement(&mut self) -> Statement {
+        let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+        self.advance();
+        Statement { kind: StatementKind::Continue, span }
+    }
+
+    fn parse_assignment_or_expression_statement(&mut self) -> Statement {
+        let first_expr = self.parse_expression();
+        let mut targets = vec![first_expr];
+
+        while matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Comma)) {
+            self.advance();
+            targets.push(self.parse_expression());
+        }
+
+        let statement = match self.current().map(|tok| &tok.kind) {
+            Some(TokenKind::Equal) | Some(TokenKind::PlusEqual) | Some(TokenKind::MinusEqual)
+            | Some(TokenKind::StarEqual) | Some(TokenKind::SlashEqual) | Some(TokenKind::PercentEqual) => {
+                let operator = self.current().unwrap().kind.clone();
+                self.advance();
+                let values = self.parse_expression_list();
+                let span = values.last().map(|expr| expr.span).unwrap_or(targets.last().unwrap().span);
+                Statement {
+                    kind: StatementKind::Assignment {
+                        targets,
+                        values,
+                        operator: self.operator_name(&operator),
+                    },
+                    span,
+                }
+            }
+            _ => {
+                let span = targets.last().unwrap().span;
+                if targets.len() == 1 {
+                    Statement { kind: StatementKind::Expression(targets.into_iter().next().unwrap()), span }
+                } else {
+                    // Multiple expressions without assignment treat as expression statement of last expr.
+                    Statement { kind: StatementKind::Expression(targets.pop().unwrap()), span }
+                }
+            }
+        };
+
+        statement
+    }
+
+    fn parse_expression_list(&mut self) -> Vec<Expression> {
+        let mut expressions = Vec::new();
+
+        expressions.push(self.parse_expression());
+        while matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Comma)) {
+            self.advance();
+            expressions.push(self.parse_expression());
+        }
+
+        expressions
     }
 
     fn parse_prefix_expression(&mut self) -> Expression {
@@ -223,12 +339,18 @@ impl<'a> Parser<'a> {
             TokenKind::Slash => "/".to_string(),
             TokenKind::Percent => "%".to_string(),
             TokenKind::Caret => "^".to_string(),
+            TokenKind::Equal => "=".to_string(),
             TokenKind::EqualEqual => "==".to_string(),
             TokenKind::NotEqual => "~=".to_string(),
             TokenKind::Less => "<".to_string(),
             TokenKind::LessEqual => "<=".to_string(),
             TokenKind::Greater => ">".to_string(),
             TokenKind::GreaterEqual => ">=".to_string(),
+            TokenKind::PlusEqual => "+=".to_string(),
+            TokenKind::MinusEqual => "-=".to_string(),
+            TokenKind::StarEqual => "*=".to_string(),
+            TokenKind::SlashEqual => "/=".to_string(),
+            TokenKind::PercentEqual => "%=".to_string(),
             TokenKind::And => "and".to_string(),
             TokenKind::Or => "or".to_string(),
             TokenKind::DotDot => "..".to_string(),
