@@ -68,8 +68,13 @@ pub enum TokenKind {
     Comma,
     Dot,
     DotDot,
+    DotDotDot,
     Colon,
     Semicolon,
+    Pipe,
+    Ampersand,
+    Question,
+    Arrow,
 
     EOF,
     Unknown(char),
@@ -146,8 +151,14 @@ impl<'a> Lexer<'a> {
                     Token { kind: TokenKind::StringLiteral(s), span: self.make_span(start, end) }
                 } else {
                     // operators and punctuation
-                    // two-char operators
-                    if let Some(kind_op) = self.match_two_char_op(b) {
+                    // three-char operators
+                    if b == b'.' && self.peek_byte() == Some(b'.') && self.src.as_bytes().get(self.pos + 2).copied() == Some(b'.') {
+                        self.advance();
+                        self.advance();
+                        self.advance();
+                        let end = self.pos;
+                        Token { kind: TokenKind::DotDotDot, span: self.make_span(start, end) }
+                    } else if let Some(kind_op) = self.match_two_char_op(b) {
                         let end = self.pos;
                         Token { kind: kind_op, span: self.make_span(start, end) }
                     } else {
@@ -173,6 +184,9 @@ impl<'a> Lexer<'a> {
                             ';' => TokenKind::Semicolon,
                             ':' => TokenKind::Colon,
                             '.' => TokenKind::Dot,
+                            '|' => TokenKind::Pipe,
+                            '&' => TokenKind::Ampersand,
+                            '?' => TokenKind::Question,
                             _ => TokenKind::Unknown(ch),
                         };
                         let end = self.pos;
@@ -269,6 +283,7 @@ impl<'a> Lexer<'a> {
             (b'/', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::SlashEqual) }
             (b'%', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::PercentEqual) }
             (b'.', Some(b'.')) => { self.advance(); self.advance(); Some(TokenKind::DotDot) }
+            (b'-', Some(b'>')) => { self.advance(); self.advance(); Some(TokenKind::Arrow) }
             _ => None,
         }
     }

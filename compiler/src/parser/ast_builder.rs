@@ -20,7 +20,7 @@ pub enum StatementKind {
     Break,
     Continue,
     Local {
-        names: Vec<(String, Option<String>)>,
+        names: Vec<(String, Option<TypeExpression>)>,
         initializers: Vec<Expression>,
     },
     Assignment {
@@ -31,13 +31,14 @@ pub enum StatementKind {
     Function {
         name: String,
         receiver: Option<String>,
-        params: Vec<(String, Option<String>)>,
+        params: Vec<(String, Option<TypeExpression>)>,
+        return_type: Option<TypeExpression>,
         body: Vec<Statement>,
         is_local: bool,
     },
     TypeAlias {
         name: String,
-        alias: String,
+        alias: TypeExpression,
     },
 }
 
@@ -67,6 +68,29 @@ pub enum ExpressionKind {
         callee: Box<Expression>,
         arguments: Vec<Expression>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeExpression {
+    pub kind: TypeExpressionKind,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeExpressionKind {
+    Named(String),
+    Optional(Box<TypeExpression>),
+    Union(Vec<TypeExpression>),
+    Intersection(Vec<TypeExpression>),
+    Table(Vec<(String, TypeExpression, SourceSpan)>),
+    Array(Box<TypeExpression>),
+    Function {
+        params: Vec<TypeExpression>,
+        return_type: Box<TypeExpression>,
+    },
+    Tuple(Vec<TypeExpression>),
+    Variadic(Box<TypeExpression>),
+    Parenthesized(Box<TypeExpression>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

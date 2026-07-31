@@ -1,6 +1,6 @@
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{Token, TokenKind};
-use crate::parser::ast_builder::{make_program, AstNode, Expression, ExpressionKind, Statement, StatementKind};
+use crate::parser::ast_builder::{make_program, AstNode, Expression, ExpressionKind, Statement, StatementKind, TypeExpression, TypeExpressionKind};
 use crate::parser::cursor::Cursor;
 use crate::parser::precedence::Precedence;
 use crate::source::{FileId, SourceSpan};
@@ -205,16 +205,17 @@ impl<'a> Parser<'a> {
         };
 
         let params = self.parse_parameter_list();
+        let return_type = self.parse_type_annotation();
         let body = self.parse_block();
         let span = body.last().map(|stmt| stmt.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
 
         Statement {
-            kind: StatementKind::Function { name, receiver, params, body, is_local },
+            kind: StatementKind::Function { name, receiver, params, return_type, body, is_local },
             span,
         }
     }
 
-    fn parse_parameter_list(&mut self) -> Vec<(String, Option<String>)> {
+    fn parse_parameter_list(&mut self) -> Vec<(String, Option<TypeExpression>)> {
         let mut params = Vec::new();
         if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::LeftParen)) {
             self.advance();
@@ -268,7 +269,7 @@ impl<'a> Parser<'a> {
             self.advance();
             self.parse_type_expression()
         } else {
-            String::new()
+            TypeExpression { kind: TypeExpressionKind::Named(String::new()), span: SourceSpan::new(FileId::new(0), 0, 0) }
         };
 
         Statement {
@@ -277,23 +278,187 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_type_annotation(&mut self) -> Option<String> {
+    fn parse_type_annotation(&mut self) -> Option<TypeExpression> {
         if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Colon)) {
             self.advance();
-            if let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
-                self.advance();
-                return Some(name);
-            }
+            return Some(self.parse_type_expression());
         }
         None
     }
 
-    fn parse_type_expression(&mut self) -> String {
-        if let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
+    fn parse_type_expression(&mut self) -> TypeExpression {
+        self.parse_union_type()
+    }
+
+    fn parse_union_type(&mut self) -> TypeExpression {
+        let mut types = vec![self.parse_intersection_type()];
+        while matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Pipe)) {
             self.advance();
-            name
+            types.push(self.parse_intersection_type());
+        }
+        if types.len() == 1 {
+            types.into_iter().next().unwrap()
         } else {
-            String::new()
+            let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+            TypeExpression { kind: TypeExpressionKind::Union(types), span }
+        }
+    }
+
+    fn parse_intersection_type(&mut self) -> TypeExpression {
+        let mut types = vec![self.parse_optional_type()];
+        while matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Ampersand)) {
+            self.advance();
+            types.push(self.parse_optional_type());
+        }
+        if types.len() == 1 {
+            types.into_iter().next().unwrap()
+        } else {
+            let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+            TypeExpression { kind: TypeExpressionKind::Intersection(types), span }
+        }
+    }
+
+    fn parse_optional_type(&mut self) -> TypeExpression {
+        let mut typ = self.parse_primary_type();
+        while matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Question)) {
+            let start = typ.span.start();
+            let file_id = typ.span.file_id();
+            self.advance();
+            let span = self.current().map(|tok| tok.span).unwrap_or(typ.span);
+            let end = span.end();
+            typ = TypeExpression { kind: TypeExpressionKind::Optional(Box::new(typ)), span: SourceSpan::new(file_id, start, end) };
+        }
+        typ
+    }
+
+    fn parse_primary_type(&mut self) -> TypeExpression {
+        match self.current().map(|tok| &tok.kind) {
+            Some(TokenKind::LeftParen) => self.parse_parenthesized_type(),
+            Some(TokenKind::LeftBrace) => self.parse_table_or_array_type(),
+            Some(TokenKind::DotDotDot) => self.parse_variadic_type(),
+            Some(TokenKind::Identifier(_))
+            | Some(TokenKind::Any)
+            | Some(TokenKind::Never)
+            | Some(TokenKind::Nil) => self.parse_named_type(),
+            _ => {
+                let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+                self.advance();
+                TypeExpression { kind: TypeExpressionKind::Named(String::new()), span }
+            }
+        }
+    }
+
+    fn parse_parenthesized_type(&mut self) -> TypeExpression {
+        let start = self.current().map(|tok| tok.span.start()).unwrap_or(0);
+        self.advance();
+        let mut types = Vec::new();
+
+        while !matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightParen) | Some(TokenKind::EOF)) {
+            types.push(self.parse_type_expression());
+            if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Comma)) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightParen)) {
+            self.advance();
+        }
+
+        let end = self.current().map(|tok| tok.span.end()).unwrap_or(start);
+        let type_expr = if types.len() == 1 {
+            let inner = types.remove(0);
+            let file_id = inner.span.file_id();
+            TypeExpression { kind: TypeExpressionKind::Parenthesized(Box::new(inner)), span: SourceSpan::new(file_id, start, end) }
+        } else {
+            let file_id = self.current().map(|tok| tok.span.file_id()).unwrap_or(FileId::new(0));
+            TypeExpression { kind: TypeExpressionKind::Tuple(types), span: SourceSpan::new(file_id, start, end) }
+        };
+
+        if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Arrow)) {
+            self.advance();
+            let return_type = self.parse_type_expression();
+            let params = match type_expr.kind {
+                TypeExpressionKind::Tuple(elements) => elements,
+                TypeExpressionKind::Parenthesized(inner) => vec![*inner],
+                _ => vec![type_expr],
+            };
+            let file_id = return_type.span.file_id();
+            let span = SourceSpan::new(file_id, start, return_type.span.end());
+            TypeExpression { kind: TypeExpressionKind::Function { params, return_type: Box::new(return_type) }, span }
+        } else {
+            type_expr
+        }
+    }
+
+    fn parse_table_or_array_type(&mut self) -> TypeExpression {
+        let start = self.current().map(|tok| tok.span.start()).unwrap_or(0);
+        self.advance();
+
+        if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightBrace)) {
+            self.advance();
+            let file_id = self.current().map(|tok| tok.span.file_id()).unwrap_or(FileId::new(0));
+            return TypeExpression { kind: TypeExpressionKind::Table(Vec::new()), span: SourceSpan::new(file_id, start, self.current().map(|tok| tok.span.end()).unwrap_or(start)) };
+        }
+
+        let peeked = self.peek().map(|tok| &tok.kind);
+        if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Identifier(_))) && matches!(peeked, Some(TokenKind::Colon)) {
+            let mut fields = Vec::new();
+            while !matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightBrace) | Some(TokenKind::EOF)) {
+                if let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
+                    let field_start = self.current().map(|tok| tok.span.start()).unwrap_or(start);
+                    self.advance();
+                    self.advance();
+                    let field_type = self.parse_type_expression();
+                    let field_span = SourceSpan::new(field_type.span.file_id(), field_start, field_type.span.end());
+                    fields.push((name, field_type, field_span));
+                    if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Comma)) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightBrace)) {
+                self.advance();
+            }
+            let file_id = self.current().map(|tok| tok.span.file_id()).unwrap_or(FileId::new(0));
+            let end = self.current().map(|tok| tok.span.end()).unwrap_or(start);
+            TypeExpression { kind: TypeExpressionKind::Table(fields), span: SourceSpan::new(file_id, start, end) }
+        } else {
+            let element_type = self.parse_type_expression();
+            if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightBrace)) {
+                self.advance();
+            }
+            let file_id = self.current().map(|tok| tok.span.file_id()).unwrap_or(FileId::new(0));
+            TypeExpression { kind: TypeExpressionKind::Array(Box::new(element_type)), span: SourceSpan::new(file_id, start, self.current().map(|tok| tok.span.end()).unwrap_or(start)) }
+        }
+    }
+
+    fn parse_variadic_type(&mut self) -> TypeExpression {
+        let start = self.current().map(|tok| tok.span.start()).unwrap_or(0);
+        self.advance();
+        let element_type = self.parse_type_expression();
+        TypeExpression { kind: TypeExpressionKind::Variadic(Box::new(element_type.clone())), span: SourceSpan::new(element_type.span.file_id(), start, element_type.span.end()) }
+    }
+
+    fn parse_named_type(&mut self) -> TypeExpression {
+        if let Some(kind) = self.current().map(|tok| tok.kind.clone()) {
+            let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+            let name = match kind {
+                TokenKind::Identifier(name) => name,
+                TokenKind::Any => "any".to_string(),
+                TokenKind::Never => "never".to_string(),
+                TokenKind::Nil => "nil".to_string(),
+                _ => String::new(),
+            };
+            self.advance();
+            TypeExpression { kind: TypeExpressionKind::Named(name), span }
+        } else {
+            TypeExpression { kind: TypeExpressionKind::Named(String::new()), span: SourceSpan::new(FileId::new(0), 0, 0) }
         }
     }
 
