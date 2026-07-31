@@ -20,13 +20,24 @@ pub enum StatementKind {
     Break,
     Continue,
     Local {
-        names: Vec<String>,
+        names: Vec<(String, Option<String>)>,
         initializers: Vec<Expression>,
     },
     Assignment {
         targets: Vec<Expression>,
         values: Vec<Expression>,
         operator: String,
+    },
+    Function {
+        name: String,
+        receiver: Option<String>,
+        params: Vec<(String, Option<String>)>,
+        body: Vec<Statement>,
+        is_local: bool,
+    },
+    TypeAlias {
+        name: String,
+        alias: String,
     },
 }
 

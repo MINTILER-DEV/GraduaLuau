@@ -60,7 +60,15 @@ impl<'a> Parser<'a> {
 
     fn parse_statement(&mut self) -> Statement {
         match self.current().map(|tok| &tok.kind) {
-            Some(TokenKind::Local) => self.parse_local_statement(),
+            Some(TokenKind::Local) => {
+                if matches!(self.peek().map(|tok| &tok.kind), Some(TokenKind::Function)) {
+                    self.parse_local_function_declaration()
+                } else {
+                    self.parse_local_statement()
+                }
+            }
+            Some(TokenKind::Function) => self.parse_function_declaration(false),
+            Some(TokenKind::Type) => self.parse_type_alias_statement(),
             Some(TokenKind::Return) => self.parse_return_statement(),
             Some(TokenKind::Break) => self.parse_break_statement(),
             Some(TokenKind::Continue) => self.parse_continue_statement(),
@@ -73,8 +81,9 @@ impl<'a> Parser<'a> {
         let mut names = Vec::new();
 
         while let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
-            names.push(name);
             self.advance();
+            let annotation = self.parse_type_annotation();
+            names.push((name, annotation));
             if !matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Comma)) {
                 break;
             }
@@ -89,9 +98,6 @@ impl<'a> Parser<'a> {
 
         let span = if let Some(last) = initializers.last() {
             last.span
-        } else if let Some(last_name) = names.last() {
-            let last_span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
-            last_span
         } else {
             self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0))
         };
@@ -159,13 +165,136 @@ impl<'a> Parser<'a> {
                 if targets.len() == 1 {
                     Statement { kind: StatementKind::Expression(targets.into_iter().next().unwrap()), span }
                 } else {
-                    // Multiple expressions without assignment treat as expression statement of last expr.
                     Statement { kind: StatementKind::Expression(targets.pop().unwrap()), span }
                 }
             }
         };
 
         statement
+    }
+
+    fn parse_local_function_declaration(&mut self) -> Statement {
+        self.advance();
+        let function_statement = self.parse_function_declaration(true);
+        function_statement
+    }
+
+    fn parse_function_declaration(&mut self, is_local: bool) -> Statement {
+        if is_local {
+            self.advance();
+        }
+        self.advance();
+
+        let mut receiver = None;
+        let name = if let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
+            self.advance();
+            if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Colon)) {
+                self.advance();
+                if let Some(TokenKind::Identifier(method_name)) = self.current().map(|tok| tok.kind.clone()) {
+                    receiver = Some(name);
+                    self.advance();
+                    method_name
+                } else {
+                    name
+                }
+            } else {
+                name
+            }
+        } else {
+            String::new()
+        };
+
+        let params = self.parse_parameter_list();
+        let body = self.parse_block();
+        let span = body.last().map(|stmt| stmt.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+
+        Statement {
+            kind: StatementKind::Function { name, receiver, params, body, is_local },
+            span,
+        }
+    }
+
+    fn parse_parameter_list(&mut self) -> Vec<(String, Option<String>)> {
+        let mut params = Vec::new();
+        if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::LeftParen)) {
+            self.advance();
+            while !matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightParen) | Some(TokenKind::EOF)) {
+                if let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
+                    self.advance();
+                    let annotation = self.parse_type_annotation();
+                    params.push((name, annotation));
+                    if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Comma)) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightParen)) {
+                self.advance();
+            }
+        }
+        params
+    }
+
+    fn parse_block(&mut self) -> Vec<Statement> {
+        let mut statements = Vec::new();
+        while let Some(kind) = self.current().map(|tok| &tok.kind) {
+            if matches!(kind, TokenKind::End) {
+                self.advance();
+                break;
+            }
+            let statement = self.parse_statement();
+            statements.push(statement);
+            if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Semicolon)) {
+                self.advance();
+            }
+        }
+        statements
+    }
+
+    fn parse_type_alias_statement(&mut self) -> Statement {
+        self.advance();
+        let name = if let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
+            self.advance();
+            name
+        } else {
+            String::new()
+        };
+
+        let alias = if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Equal)) {
+            self.advance();
+            self.parse_type_expression()
+        } else {
+            String::new()
+        };
+
+        Statement {
+            kind: StatementKind::TypeAlias { name, alias },
+            span: self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0)),
+        }
+    }
+
+    fn parse_type_annotation(&mut self) -> Option<String> {
+        if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Colon)) {
+            self.advance();
+            if let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
+                self.advance();
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    fn parse_type_expression(&mut self) -> String {
+        if let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
+            self.advance();
+            name
+        } else {
+            String::new()
+        }
     }
 
     fn parse_expression_list(&mut self) -> Vec<Expression> {
