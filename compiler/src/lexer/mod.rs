@@ -30,6 +30,7 @@ pub enum TokenKind {
     Typeof,
     NumberLiteral(String),
     StringLiteral(String),
+    InterpolatedString(String),
     True,
     False,
     Nil,
@@ -57,6 +58,8 @@ pub enum TokenKind {
     StarEqual,
     SlashEqual,
     PercentEqual,
+    AmpersandEqual,
+    PipeEqual,
 
     // Delimiters
     LeftParen,
@@ -75,9 +78,21 @@ pub enum TokenKind {
     Ampersand,
     Question,
     Arrow,
+    InterpolatedStringStart,
+    InterpolatedStringEnd,
+    StringText(String),
+    InterpolationStart,
+    InterpolationEnd,
 
     EOF,
     Unknown(char),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LexerState {
+    Normal,
+    InterpolatedStringBody,
+    InInterpolation { brace_depth: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +106,7 @@ pub struct Lexer<'a> {
     src: &'a str,
     pos: usize,
     len: usize,
+    state: LexerState,
 }
 
 impl<'a> Lexer<'a> {
@@ -98,7 +114,7 @@ impl<'a> Lexer<'a> {
         let src = file.text();
         let len = src.len();
 
-        Self { file, src, pos: 0, len }
+        Self { file, src, pos: 0, len, state: LexerState::Normal }
     }
 
     fn current_byte(&self) -> Option<u8> {
@@ -149,6 +165,12 @@ impl<'a> Lexer<'a> {
                     let s = self.read_string();
                     let end = self.pos;
                     Token { kind: TokenKind::StringLiteral(s), span: self.make_span(start, end) }
+                } else if b == b'`' {
+                    // interpolated string - store the raw content for parser to handle
+                    self.advance(); // consume '`'
+                    let raw_content = self.read_interpolated_string_raw();
+                    let end = self.pos;
+                    Token { kind: TokenKind::InterpolatedString(raw_content), span: self.make_span(start, end) }
                 } else {
                     // operators and punctuation
                     // three-char operators
@@ -271,6 +293,21 @@ impl<'a> Lexer<'a> {
         out
     }
 
+    fn read_interpolated_string_raw(&mut self) -> String {
+        let mut content = String::new();
+
+        while let Some(b) = self.current_byte() {
+            if b == b'`' {
+                self.advance();
+                break;
+            }
+            content.push(b as char);
+            self.advance();
+        }
+
+        content
+    }
+
     fn match_two_char_op(&mut self, b: u8) -> Option<TokenKind> {
         match (b, self.peek_byte()) {
             (b'=', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::EqualEqual) }
@@ -282,6 +319,8 @@ impl<'a> Lexer<'a> {
             (b'*', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::StarEqual) }
             (b'/', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::SlashEqual) }
             (b'%', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::PercentEqual) }
+            (b'&', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::AmpersandEqual) }
+            (b'|', Some(b'=')) => { self.advance(); self.advance(); Some(TokenKind::PipeEqual) }
             (b'.', Some(b'.')) => { self.advance(); self.advance(); Some(TokenKind::DotDot) }
             (b'-', Some(b'>')) => { self.advance(); self.advance(); Some(TokenKind::Arrow) }
             _ => None,

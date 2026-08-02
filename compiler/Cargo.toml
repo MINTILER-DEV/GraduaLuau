@@ -17,6 +17,30 @@ path = "../tests/lexer/mod.rs"
 name = "lexer_fuzz"
 path = "../tests/lexer_fuzz.rs"
 
+[[test]]
+name = "parser"
+path = "../tests/parser/mod.rs"
+
+[[test]]
+name = "parser_recovery"
+path = "../tests/parser/recovery_tests.rs"
+
+[[test]]
+name = "parser_unit"
+path = "../tests/parser/unit_tests.rs"
+
+[[test]]
+name = "parser_ast_validation"
+path = "../tests/parser/ast_validation.rs"
+
+[[test]]
+name = "parser_snapshot"
+path = "../tests/parser/snapshot_tests.rs"
+
+[[test]]
+name = "parser_luau_compatibility"
+path = "../tests/parser/luau_compatibility.rs"
+
 [dependencies]
 
 [dev-dependencies]

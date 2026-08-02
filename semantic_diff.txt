@@ -1,0 +1,432 @@
+diff --git a/compiler/src/semantic/mod.rs b/compiler/src/semantic/mod.rs
+index f1d5918..c85a62c 100644
+--- a/compiler/src/semantic/mod.rs
++++ b/compiler/src/semantic/mod.rs
+@@ -1,2 +1,425 @@
+-#[derive(Debug, Default)]
+-pub struct SemanticStage;
++use std::collections::HashMap;
++
++use crate::diagnostics::Diagnostic;
++use crate::parser::ast_builder::{AstNode, Statement, StatementKind, TypeExpression};
++use crate::source::{FileId, SourceSpan};
++
++#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
++pub struct SymbolId(usize);
++
++#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
++pub struct ScopeId(usize);
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub enum SymbolKind {
++    Variable,
++    Parameter,
++    Function,
++    Method,
++    TypeAlias,
++    BuiltinFunction,
++    BuiltinType,
++    Module,
++    NativeFunction,
++    GenericParameter,
++}
++
++#[derive(Debug, Clone)]
++pub struct Symbol {
++    pub id: SymbolId,
++    pub name: String,
++    pub kind: SymbolKind,
++    pub declaring_scope: ScopeId,
++    pub declaration: Option<Statement>,
++    pub declared_type: Option<TypeExpression>,
++    pub span: SourceSpan,
++}
++
++#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
++pub enum SymbolNamespace {
++    Value,
++    Type,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct Scope {
++    pub id: ScopeId,
++    pub parent: Option<ScopeId>,
++    pub value_symbols: HashMap<String, SymbolId>,
++    pub type_symbols: HashMap<String, SymbolId>,
++}
++
++#[derive(Debug)]
++pub struct SymbolTable {
++    pub root_scope: ScopeId,
++    pub scopes: Vec<Scope>,
++    pub symbols: Vec<Symbol>,
++}
++
++impl SymbolTable {
++    pub fn new() -> Self {
++        let root_scope = ScopeId(0);
++        let mut scopes = Vec::new();
++        scopes.push(Scope {
++            id: root_scope,
++            parent: None,
++            value_symbols: HashMap::new(),
++            type_symbols: HashMap::new(),
++        });
++
++        let mut table = SymbolTable { root_scope, scopes, symbols: Vec::new() };
++        table.register_builtin_symbols();
++        table
++    }
++
++    pub fn root_scope(&self) -> ScopeId {
++        self.root_scope
++    }
++
++    pub fn scope_count(&self) -> usize {
++        self.scopes.len()
++    }
++
++    pub fn symbol_count(&self) -> usize {
++        self.symbols.len()
++    }
++
++    pub fn symbol(&self, id: SymbolId) -> Option<&Symbol> {
++        self.symbols.get(id.0)
++    }
++
++    pub fn lookup(&self, name: &str, namespace: SymbolNamespace, start_scope: ScopeId) -> Option<&Symbol> {
++        let mut current = Some(start_scope);
++        while let Some(scope_id) = current {
++            let scope = &self.scopes[scope_id.0];
++            let symbol_id = match namespace {
++                SymbolNamespace::Value => scope.value_symbols.get(name),
++                SymbolNamespace::Type => scope.type_symbols.get(name),
++            };
++            if let Some(&symbol_id) = symbol_id {
++                return self.symbol(symbol_id);
++            }
++            current = scope.parent;
++        }
++        None
++    }
++
++    fn next_symbol_id(&self) -> SymbolId {
++        SymbolId(self.symbols.len())
++    }
++
++    fn insert_symbol(&mut self, scope_id: ScopeId, symbol: Symbol) -> SymbolId {
++        let id = symbol.id;
++        let scope = &mut self.scopes[scope_id.0];
++        match symbol.kind {
++            SymbolKind::TypeAlias | SymbolKind::BuiltinType | SymbolKind::GenericParameter => {
++                scope.type_symbols.insert(symbol.name.clone(), id);
++            }
++            _ => {
++                scope.value_symbols.insert(symbol.name.clone(), id);
++            }
++        }
++        self.symbols.push(symbol);
++        id
++    }
++
++    fn register_builtin_symbols(&mut self) {
++        let builtins = [
++            ("print", SymbolKind::BuiltinFunction),
++            ("warn", SymbolKind::BuiltinFunction),
++            ("require", SymbolKind::BuiltinFunction),
++            ("pairs", SymbolKind::BuiltinFunction),
++            ("ipairs", SymbolKind::BuiltinFunction),
++            ("math", SymbolKind::BuiltinFunction),
++            ("string", SymbolKind::BuiltinFunction),
++            ("table", SymbolKind::BuiltinFunction),
++            ("coroutine", SymbolKind::BuiltinFunction),
++            ("task", SymbolKind::BuiltinFunction),
++            ("os", SymbolKind::BuiltinFunction),
++        ];
++
++        for (name, kind) in builtins {
++            let id = self.next_symbol_id();
++            let symbol = Symbol {
++                id,
++                name: name.to_string(),
++                kind,
++                declaring_scope: self.root_scope,
++                declaration: None,
++                declared_type: None,
++                span: SourceSpan::new(FileId::new(0), 0, 0),
++            };
++            self.insert_symbol(self.root_scope, symbol);
++        }
++
++        let builtin_types = [
++            "number",
++            "string",
++            "boolean",
++            "nil",
++            "thread",
++            "buffer",
++            "any",
++            "unknown",
++            "never",
++        ];
++
++        for name in builtin_types {
++            let id = self.next_symbol_id();
++            let symbol = Symbol {
++                id,
++                name: name.to_string(),
++                kind: SymbolKind::BuiltinType,
++                declaring_scope: self.root_scope,
++                declaration: None,
++                declared_type: None,
++                span: SourceSpan::new(FileId::new(0), 0, 0),
++            };
++            self.insert_symbol(self.root_scope, symbol);
++        }
++    }
++}
++
++#[derive(Debug)]
++pub struct SymbolTableBuilder {
++    table: SymbolTable,
++    scope_stack: Vec<ScopeId>,
++    diagnostics: Vec<Diagnostic>,
++}
++
++impl SymbolTableBuilder {
++    pub fn new() -> Self {
++        Self { table: SymbolTable::new(), scope_stack: vec![ScopeId(0)], diagnostics: Vec::new() }
++    }
++
++    pub fn build(mut self, program: &AstNode) -> (SymbolTable, Vec<Diagnostic>) {
++        if let AstNode::Program(program) = program {
++            self.process_statements(&program.statements);
++        }
++        (self.table, self.diagnostics)
++    }
++
++    fn current_scope(&self) -> ScopeId {
++        *self.scope_stack.last().unwrap()
++    }
++
++    fn enter_scope(&mut self) -> ScopeId {
++        let id = ScopeId(self.table.scopes.len());
++        let parent = Some(self.current_scope());
++        self.table.scopes.push(Scope {
++            id,
++            parent,
++            value_symbols: HashMap::new(),
++            type_symbols: HashMap::new(),
++        });
++        self.scope_stack.push(id);
++        id
++    }
++
++    fn exit_scope(&mut self) {
++        self.scope_stack.pop();
++    }
++
++    fn process_statements(&mut self, statements: &[Statement]) {
++        for statement in statements {
++            self.process_statement(statement);
++        }
++    }
++
++    fn process_statement(&mut self, statement: &Statement) {
++        match &statement.kind {
++            StatementKind::Local { names, .. } => {
++                for (name, annotation) in names {
++                    self.insert_symbol(
++                        name.clone(),
++                        SymbolKind::Variable,
++                        Some(statement.clone()),
++                        annotation.clone(),
++                        statement.span,
++                    );
++                }
++            }
++            StatementKind::Function { name, receiver, params, return_type, body, is_local } => {
++                let kind = if receiver.is_some() { SymbolKind::Method } else { SymbolKind::Function };
++                self.insert_symbol(
++                    name.clone(),
++                    kind,
++                    Some(statement.clone()),
++                    return_type.clone(),
++                    statement.span,
++                );
++
++                let _function_scope = self.enter_scope();
++                for (name, annotation) in params {
++                    self.insert_symbol(
++                        name.clone(),
++                        SymbolKind::Parameter,
++                        Some(statement.clone()),
++                        annotation.clone(),
++                        statement.span,
++                    );
++                }
++                self.process_statements(body);
++                self.exit_scope();
++            }
++            StatementKind::TypeAlias { name, alias } => {
++                self.insert_symbol(
++                    name.clone(),
++                    SymbolKind::TypeAlias,
++                    Some(statement.clone()),
++                    Some(alias.clone()),
++                    statement.span,
++                );
++            }
++            StatementKind::Return(_) | StatementKind::Break | StatementKind::Continue | StatementKind::Expression(_) | StatementKind::Empty | StatementKind::Error => {}
++            StatementKind::Assignment { .. } => {}
++        }
++    }
++
++    fn insert_symbol(
++        &mut self,
++        name: String,
++        kind: SymbolKind,
++        declaration: Option<Statement>,
++        declared_type: Option<TypeExpression>,
++        span: SourceSpan,
++    ) {
++        let current_scope = self.current_scope();
++        let scope = &self.table.scopes[current_scope.0];
++        let exists = match kind {
++            SymbolKind::TypeAlias | SymbolKind::BuiltinType | SymbolKind::GenericParameter => {
++                scope.type_symbols.contains_key(&name)
++            }
++            _ => scope.value_symbols.contains_key(&name),
++        };
++        if exists {
++            self.diagnostics.push(
++                Diagnostic::error(format!("Duplicate declaration of '{name}'."))
++                    .with_span(span),
++            );
++            return;
++        }
++
++        let symbol = Symbol {
++            id: self.table.next_symbol_id(),
++            name: name.clone(),
++            kind,
++            declaring_scope: current_scope,
++            declaration,
++            declared_type,
++            span,
++        };
++
++        self.table.insert_symbol(current_scope, symbol);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::lexer::Lexer;
++    use crate::parser::Parser;
++    use crate::source::SourceManager;
++    use std::path::PathBuf;
++
++    fn build_symbol_table(code: &str) -> (SymbolTable, Vec<Diagnostic>) {
++        let mut sources = SourceManager::new();
++        let file_id = sources.add_file(PathBuf::from("test.glu"), code.to_string());
++        let file = sources.get(file_id).unwrap();
++
++        let mut lexer = Lexer::new(file);
++        let mut tokens = Vec::new();
++        loop {
++            let token = lexer.next_token();
++            tokens.push(token.clone());
++            if matches!(token.kind, crate::lexer::TokenKind::EOF) {
++                break;
++            }
++        }
++
++        let mut parser = Parser::new(&tokens);
++        let ast = parser.parse_program();
++
++        SymbolTableBuilder::new().build(&ast)
++    }
++
++    #[test]
++    fn builtin_symbols_are_initialized() {
++        let (table, _) = build_symbol_table("");
++        let root = table.root_scope();
++
++        let print_symbol = table.lookup("print", SymbolNamespace::Value, root).expect("expected print builtin");
++        assert_eq!(print_symbol.kind, SymbolKind::BuiltinFunction);
++
++        let string_symbol = table.lookup("string", SymbolNamespace::Value, root).expect("expected string builtin");
++        assert_eq!(string_symbol.kind, SymbolKind::BuiltinFunction);
++        let string_type_symbol = table.lookup("string", SymbolNamespace::Type, root).expect("expected string builtin type");
++        assert_eq!(string_type_symbol.kind, SymbolKind::BuiltinType);
++
++        let number_symbol = table.lookup("number", SymbolNamespace::Type, root).expect("expected number builtin");
++        assert_eq!(number_symbol.kind, SymbolKind::BuiltinType);
++    }
++
++    #[test]
++    fn local_variables_register_as_symbols() {
++        let (table, diagnostics) = build_symbol_table("local x = 100\n");
++        assert!(diagnostics.is_empty());
++        let root = table.root_scope();
++        let symbol = table.lookup("x", SymbolNamespace::Value, root).expect("expected x symbol");
++        assert_eq!(symbol.kind, SymbolKind::Variable);
++        assert_eq!(symbol.name, "x");
++    }
++
++    #[test]
++    fn function_and_parameter_symbols_are_registered() {
++        let (table, diagnostics) = build_symbol_table("function Add(a: number, b: number) end\n");
++        assert!(diagnostics.is_empty());
++
++        let root = table.root_scope();
++        let function_symbol = table.lookup("Add", SymbolNamespace::Value, root).expect("expected Add symbol");
++        assert_eq!(function_symbol.kind, SymbolKind::Function);
++
++        let param_a = table.symbols.iter().find(|symbol| symbol.name == "a" && symbol.kind == SymbolKind::Parameter);
++        let param_b = table.symbols.iter().find(|symbol| symbol.name == "b" && symbol.kind == SymbolKind::Parameter);
++        assert!(param_a.is_some(), "expected parameter a symbol");
++        assert!(param_b.is_some(), "expected parameter b symbol");
++    }
++
++    #[test]
++    fn type_alias_symbols_are_registered() {
++        let (table, diagnostics) = build_symbol_table("type Player = {}\n");
++        assert!(diagnostics.is_empty());
++
++        let root = table.root_scope();
++        let symbol = table.lookup("Player", SymbolNamespace::Type, root).expect("expected Player symbol");
++        assert_eq!(symbol.kind, SymbolKind::TypeAlias);
++    }
++
++    #[test]
++    fn duplicate_declarations_produce_diagnostics() {
++        let (_, diagnostics) = build_symbol_table("local x = 1\nlocal x = 2\n");
++        assert!(diagnostics.iter().any(|diag| diag.message().contains("Duplicate declaration of 'x'.")));
++    }
++
++    #[test]
++    fn nested_scope_shadowing_is_allowed() {
++        let (table, diagnostics) = build_symbol_table("local x = 1\nfunction foo() local x = 2 end\n");
++        assert!(diagnostics.is_empty());
++
++        let root = table.root_scope();
++        let outer_symbol = table.lookup("x", SymbolNamespace::Value, root).expect("expected outer x");
++        assert_eq!(outer_symbol.kind, SymbolKind::Variable);
++
++        assert!(table.symbols.iter().any(|symbol| {
++            symbol.name == "x" && symbol.kind == SymbolKind::Variable && symbol.declaring_scope != root
++        }));
++    }
++
++    #[test]
++    fn symbol_ids_are_unique_and_stable() {
++        let (table, _) = build_symbol_table("local a = 1\nlocal b = 2\n");
++        let ids: Vec<_> = table.symbols.iter().map(|symbol| symbol.id).collect();
++        let unique_count = ids.iter().copied().collect::<std::collections::HashSet<_>>().len();
++        assert_eq!(unique_count, table.symbols.len());
++    }
++}

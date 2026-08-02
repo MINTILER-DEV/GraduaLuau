@@ -40,6 +40,7 @@ pub enum StatementKind {
         name: String,
         alias: TypeExpression,
     },
+    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +69,41 @@ pub enum ExpressionKind {
         callee: Box<Expression>,
         arguments: Vec<Expression>,
     },
+    TableConstructor(Vec<TableField>),
+    MemberAccess {
+        object: Box<Expression>,
+        property: String,
+    },
+    Index {
+        object: Box<Expression>,
+        index: Box<Expression>,
+    },
+    MethodCall {
+        receiver: Box<Expression>,
+        method: String,
+        arguments: Vec<Expression>,
+    },
+    InterpolatedString(Vec<InterpolatedStringPart>),
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InterpolatedStringPart {
+    Text(String),
+    Expression(Expression),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableField {
+    Named {
+        key: String,
+        value: Expression,
+    },
+    Indexed {
+        key: Expression,
+        value: Expression,
+    },
+    Expression(Expression),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

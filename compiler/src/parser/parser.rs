@@ -1,18 +1,24 @@
 use crate::diagnostics::Diagnostic;
 use crate::lexer::{Token, TokenKind};
-use crate::parser::ast_builder::{make_program, AstNode, Expression, ExpressionKind, Statement, StatementKind, TypeExpression, TypeExpressionKind};
+use crate::parser::ast_builder::{make_program, AstNode, Expression, ExpressionKind, InterpolatedStringPart, Statement, StatementKind, TableField, TypeExpression, TypeExpressionKind};
 use crate::parser::cursor::Cursor;
 use crate::parser::precedence::Precedence;
+use crate::parser::recovery::{RecoveryState, is_synchronization_token, is_expression_boundary, is_statement_boundary, can_start_type};
 use crate::source::{FileId, SourceSpan};
 
 pub struct Parser<'a> {
     cursor: Cursor<'a>,
     diagnostics: Vec<Diagnostic>,
+    recovery: RecoveryState,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(tokens: &'a [Token]) -> Self {
-        Self { cursor: Cursor::new(tokens), diagnostics: Vec::new() }
+        Self { 
+            cursor: Cursor::new(tokens), 
+            diagnostics: Vec::new(),
+            recovery: RecoveryState::new(),
+        }
     }
 
     pub fn current(&self) -> Option<&'a Token> {
@@ -58,7 +64,73 @@ impl<'a> Parser<'a> {
 
     pub fn diagnostics(&self) -> &[Diagnostic] { &self.diagnostics }
 
+    fn emit_error(&mut self, message: impl Into<String>, span: SourceSpan) {
+        self.recovery.increment_error_count();
+        let diagnostic = Diagnostic::builder(crate::diagnostics::Severity::Error)
+            .message(message)
+            .span(span)
+            .build();
+        self.diagnostics.push(diagnostic);
+    }
+
+    fn emit_error_with_help(&mut self, message: impl Into<String>, span: SourceSpan, help: impl Into<String>) {
+        self.recovery.increment_error_count();
+        let diagnostic = Diagnostic::builder(crate::diagnostics::Severity::Error)
+            .message(message)
+            .span(span)
+            .help(help)
+            .build();
+        self.diagnostics.push(diagnostic);
+    }
+
+    fn synchronize_to_statement_boundary(&mut self) {
+        self.recovery.set_in_error_recovery(true);
+        
+        while let Some(token) = self.current() {
+            if is_statement_boundary(&token.kind) || is_synchronization_token(&token.kind) {
+                break;
+            }
+            self.advance();
+        }
+        
+        self.recovery.set_in_error_recovery(false);
+    }
+
+    fn synchronize_to_expression_boundary(&mut self) {
+        self.recovery.set_in_error_recovery(true);
+        
+        while let Some(token) = self.current() {
+            if is_expression_boundary(&token.kind) {
+                break;
+            }
+            self.advance();
+        }
+        
+        self.recovery.set_in_error_recovery(false);
+    }
+
+    fn make_error_statement(&mut self, span: SourceSpan) -> Statement {
+        Statement {
+            kind: StatementKind::Error,
+            span,
+        }
+    }
+
+    fn make_error_expression(&mut self, span: SourceSpan) -> Expression {
+        Expression {
+            kind: ExpressionKind::Error,
+            span,
+        }
+    }
+
     fn parse_statement(&mut self) -> Statement {
+        // Check for cascading error suppression
+        if self.recovery.should_suppress_cascading() {
+            let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+            self.advance(); // Always consume at least one token
+            return self.make_error_statement(span);
+        }
+
         match self.current().map(|tok| &tok.kind) {
             Some(TokenKind::Local) => {
                 if matches!(self.peek().map(|tok| &tok.kind), Some(TokenKind::Function)) {
@@ -79,6 +151,14 @@ impl<'a> Parser<'a> {
     fn parse_local_statement(&mut self) -> Statement {
         self.advance();
         let mut names = Vec::new();
+
+        // Handle missing identifier after 'local'
+        if !matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Identifier(_))) {
+            let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+            self.emit_error("Expected identifier after 'local'", span);
+            self.synchronize_to_statement_boundary();
+            return self.make_error_statement(span);
+        }
 
         while let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
             self.advance();
@@ -146,7 +226,8 @@ impl<'a> Parser<'a> {
 
         let statement = match self.current().map(|tok| &tok.kind) {
             Some(TokenKind::Equal) | Some(TokenKind::PlusEqual) | Some(TokenKind::MinusEqual)
-            | Some(TokenKind::StarEqual) | Some(TokenKind::SlashEqual) | Some(TokenKind::PercentEqual) => {
+            | Some(TokenKind::StarEqual) | Some(TokenKind::SlashEqual) | Some(TokenKind::PercentEqual)
+            | Some(TokenKind::AmpersandEqual) | Some(TokenKind::PipeEqual) => {
                 let operator = self.current().unwrap().kind.clone();
                 self.advance();
                 let values = self.parse_expression_list();
@@ -230,11 +311,19 @@ impl<'a> Parser<'a> {
                         break;
                     }
                 } else {
+                    // Error recovery for invalid parameter
+                    let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+                    self.emit_error("Expected parameter name", span);
+                    self.synchronize_to_expression_boundary();
                     break;
                 }
             }
             if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightParen)) {
                 self.advance();
+            } else {
+                // Missing closing parenthesis
+                let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+                self.emit_error_with_help("Expected ')' after parameter list", span, "Insert ')' here");
             }
         }
         params
@@ -281,6 +370,14 @@ impl<'a> Parser<'a> {
     fn parse_type_annotation(&mut self) -> Option<TypeExpression> {
         if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Colon)) {
             self.advance();
+            
+            // Handle missing type after ':'
+            if !can_start_type(self.current().map(|tok| &tok.kind).unwrap_or(&TokenKind::EOF)) {
+                let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+                self.emit_error_with_help("Expected type after ':'", span, "Add a type annotation after ':'");
+                return None;
+            }
+            
             return Some(self.parse_type_expression());
         }
         None
@@ -495,6 +592,10 @@ impl<'a> Parser<'a> {
                 let expression = self.parse_expression();
                 if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightParen)) {
                     self.advance();
+                } else {
+                    // Missing closing parenthesis
+                    let span = expression.span;
+                    self.emit_error_with_help("Expected ')' after expression", span, "Insert ')' here");
                 }
                 expression
             }
@@ -528,6 +629,17 @@ impl<'a> Parser<'a> {
                     unreachable!()
                 }
             }
+            Some(TokenKind::InterpolatedString(_)) => {
+                let current = self.current().unwrap();
+                if let TokenKind::InterpolatedString(raw) = current.kind.clone() {
+                    let span = current.span;
+                    self.advance();
+                    let parts = self.parse_interpolated_string_parts(&raw);
+                    Expression { kind: ExpressionKind::InterpolatedString(parts), span }
+                } else {
+                    unreachable!()
+                }
+            }
             Some(TokenKind::True) | Some(TokenKind::False) | Some(TokenKind::Nil) => {
                 let current = self.current().unwrap();
                 let kind = match current.kind {
@@ -541,9 +653,12 @@ impl<'a> Parser<'a> {
                 Expression { kind, span }
             }
             _ => {
+                // Error recovery for unexpected tokens in expression context
                 let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
-                self.advance();
-                Expression { kind: ExpressionKind::Nil, span }
+                self.emit_error("Expected expression", span);
+                self.synchronize_to_expression_boundary();
+                self.advance(); // Ensure we consume at least one token
+                self.make_error_expression(span)
             }
         }
     }
@@ -589,6 +704,18 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::LeftParen) => {
                     expression = self.parse_call_expression(expression);
                 }
+                Some(TokenKind::StringLiteral(_)) | Some(TokenKind::LeftBrace) | Some(TokenKind::InterpolatedString(_)) => {
+                    expression = self.parse_shorthand_call(expression);
+                }
+                Some(TokenKind::Colon) => {
+                    expression = self.parse_method_call(expression);
+                }
+                Some(TokenKind::Dot) => {
+                    expression = self.parse_member_access(expression);
+                }
+                Some(TokenKind::LeftBracket) => {
+                    expression = self.parse_index_expression(expression);
+                }
                 _ => break,
             }
         }
@@ -614,6 +741,10 @@ impl<'a> Parser<'a> {
         let end = self.current().map(|tok| tok.span.end()).unwrap_or(start);
         if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightParen)) {
             self.advance();
+        } else {
+            // Missing closing parenthesis
+            let span = SourceSpan::new(file_id, start, end);
+            self.emit_error_with_help("Expected ')' after argument list", span, "Insert ')' here");
         }
 
         Expression {
@@ -621,6 +752,205 @@ impl<'a> Parser<'a> {
                 callee: Box::new(callee),
                 arguments,
             },
+            span: SourceSpan::new(file_id, start, end),
+        }
+    }
+
+    fn parse_shorthand_call(&mut self, callee: Expression) -> Expression {
+        let start = callee.span.start();
+        let file_id = callee.span.file_id();
+        let mut arguments = Vec::new();
+
+        // Parse the shorthand argument (string literal, table constructor, or interpolated string)
+        match self.current().map(|tok| &tok.kind) {
+            Some(TokenKind::StringLiteral(_)) | Some(TokenKind::InterpolatedString(_)) => {
+                let arg = self.parse_prefix_expression();
+                arguments.push(arg);
+            }
+            Some(TokenKind::LeftBrace) => {
+                let arg = self.parse_table_constructor();
+                arguments.push(arg);
+            }
+            _ => {
+                // Fallback to regular expression parsing
+                let arg = self.parse_expression();
+                arguments.push(arg);
+            }
+        }
+
+        let end = arguments.last().map(|arg| arg.span.end()).unwrap_or(start);
+        Expression {
+            kind: ExpressionKind::Call {
+                callee: Box::new(callee),
+                arguments,
+            },
+            span: SourceSpan::new(file_id, start, end),
+        }
+    }
+
+    fn parse_method_call(&mut self, receiver: Expression) -> Expression {
+        let start = receiver.span.start();
+        let file_id = receiver.span.file_id();
+        self.advance(); // consume ':'
+
+        let method_name = if let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
+            self.advance();
+            name
+        } else {
+            String::new()
+        };
+
+        let mut arguments = Vec::new();
+        
+        // Check for parenthesized arguments
+        if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::LeftParen)) {
+            self.advance();
+            while !matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightParen) | Some(TokenKind::EOF)) {
+                arguments.push(self.parse_expression());
+                if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Comma)) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightParen)) {
+                self.advance();
+            }
+        } else {
+            // Shorthand argument (string literal, interpolated string, or table constructor)
+            match self.current().map(|tok| &tok.kind) {
+                Some(TokenKind::StringLiteral(_)) | Some(TokenKind::InterpolatedString(_)) => {
+                    let arg = self.parse_prefix_expression();
+                    arguments.push(arg);
+                }
+                Some(TokenKind::LeftBrace) => {
+                    let arg = self.parse_table_constructor();
+                    arguments.push(arg);
+                }
+                _ => {}
+            }
+        }
+
+        let end = arguments.last().map(|arg| arg.span.end()).unwrap_or(method_name.len() + start);
+        Expression {
+            kind: ExpressionKind::MethodCall {
+                receiver: Box::new(receiver),
+                method: method_name,
+                arguments,
+            },
+            span: SourceSpan::new(file_id, start, end),
+        }
+    }
+
+    fn parse_member_access(&mut self, object: Expression) -> Expression {
+        let start = object.span.start();
+        let file_id = object.span.file_id();
+        self.advance(); // consume '.'
+
+        let property = if let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
+            self.advance();
+            name
+        } else {
+            String::new()
+        };
+
+        let end = self.current().map(|tok| tok.span.end()).unwrap_or(property.len() + start);
+        Expression {
+            kind: ExpressionKind::MemberAccess {
+                object: Box::new(object),
+                property,
+            },
+            span: SourceSpan::new(file_id, start, end),
+        }
+    }
+
+    fn parse_index_expression(&mut self, object: Expression) -> Expression {
+        let start = object.span.start();
+        let file_id = object.span.file_id();
+        self.advance(); // consume '['
+
+        let index = self.parse_expression();
+
+        let end = self.current().map(|tok| tok.span.end()).unwrap_or(start);
+        if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightBracket)) {
+            self.advance();
+        }
+
+        Expression {
+            kind: ExpressionKind::Index {
+                object: Box::new(object),
+                index: Box::new(index),
+            },
+            span: SourceSpan::new(file_id, start, end),
+        }
+    }
+
+    fn parse_table_constructor(&mut self) -> Expression {
+        let start = self.current().map(|tok| tok.span.start()).unwrap_or(0);
+        let file_id = self.current().map(|tok| tok.span.file_id()).unwrap_or(FileId::new(0));
+        self.advance(); // consume '{'
+
+        let mut fields = Vec::new();
+
+        while !matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightBrace) | Some(TokenKind::EOF)) {
+            // Check for named field: Name = value
+            if let Some(TokenKind::Identifier(name)) = self.current().map(|tok| tok.kind.clone()) {
+                let peeked = self.peek().map(|tok| &tok.kind);
+                if matches!(peeked, Some(TokenKind::Equal)) {
+                    self.advance(); // consume identifier
+                    self.advance(); // consume '='
+                    let value = self.parse_expression();
+                    fields.push(TableField::Named { key: name, value });
+                } else {
+                    // Could be expression field
+                    let expr = self.parse_expression();
+                    fields.push(TableField::Expression(expr));
+                }
+            }
+            // Check for indexed field: [key] = value
+            else if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::LeftBracket)) {
+                self.advance(); // consume '['
+                let key = self.parse_expression();
+                if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightBracket)) {
+                    self.advance(); // consume ']'
+                } else {
+                    let span = key.span;
+                    self.emit_error_with_help("Expected ']' after table index", span, "Insert ']' here");
+                }
+                if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Equal)) {
+                    self.advance(); // consume '='
+                    let value = self.parse_expression();
+                    fields.push(TableField::Indexed { key, value });
+                } else {
+                    // Fallback: treat as expression
+                    fields.push(TableField::Expression(key));
+                }
+            }
+            // Otherwise, it's an expression field
+            else {
+                let expr = self.parse_expression();
+                fields.push(TableField::Expression(expr));
+            }
+
+            // Check for separator
+            if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::Comma) | Some(TokenKind::Semicolon)) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        let end = self.current().map(|tok| tok.span.end()).unwrap_or(start);
+        if matches!(self.current().map(|tok| &tok.kind), Some(TokenKind::RightBrace)) {
+            self.advance();
+        } else {
+            // Missing closing brace
+            let span = SourceSpan::new(file_id, start, end);
+            self.emit_error_with_help("Expected '}' to close table constructor", span, "Insert '}' here");
+        }
+
+        Expression {
+            kind: ExpressionKind::TableConstructor(fields),
             span: SourceSpan::new(file_id, start, end),
         }
     }
@@ -645,11 +975,62 @@ impl<'a> Parser<'a> {
             TokenKind::StarEqual => "*=".to_string(),
             TokenKind::SlashEqual => "/=".to_string(),
             TokenKind::PercentEqual => "%=".to_string(),
+            TokenKind::AmpersandEqual => "&=".to_string(),
+            TokenKind::PipeEqual => "|=".to_string(),
             TokenKind::And => "and".to_string(),
             TokenKind::Or => "or".to_string(),
             TokenKind::DotDot => "..".to_string(),
             _ => "".to_string(),
         }
+    }
+
+    fn parse_interpolated_string_parts(&self, raw: &str) -> Vec<InterpolatedStringPart> {
+        let mut parts = Vec::new();
+        let mut current_text = String::new();
+        let mut chars = raw.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '{' {
+                if !current_text.is_empty() {
+                    parts.push(InterpolatedStringPart::Text(current_text.clone()));
+                    current_text.clear();
+                }
+
+                // Extract the expression inside braces
+                let mut expr_content = String::new();
+                let mut brace_depth = 1;
+
+                while let Some(inner_ch) = chars.next() {
+                    if inner_ch == '{' {
+                        brace_depth += 1;
+                        expr_content.push(inner_ch);
+                    } else if inner_ch == '}' {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            break;
+                        }
+                        expr_content.push(inner_ch);
+                    } else {
+                        expr_content.push(inner_ch);
+                    }
+                }
+
+                // For now, create a simple identifier expression
+                // In a full implementation, we'd need to re-lex and parse the expression
+                parts.push(InterpolatedStringPart::Expression(Expression {
+                    kind: ExpressionKind::Identifier(expr_content.trim().to_string()),
+                    span: SourceSpan::new(FileId::new(0), 0, 0),
+                }));
+            } else {
+                current_text.push(ch);
+            }
+        }
+
+        if !current_text.is_empty() {
+            parts.push(InterpolatedStringPart::Text(current_text));
+        }
+
+        parts
     }
 }
 #[cfg(test)]
