@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::diagnostics::DiagnosticBag;
+use crate::semantic::ModuleMetadata;
 use crate::source::SourceManager;
 use crate::utils::LogLevel;
 
@@ -8,6 +9,7 @@ use crate::utils::LogLevel;
 pub struct CompilerContext {
     pub sources: SourceManager,
     pub diagnostics: DiagnosticBag,
+    pub resolved_modules: Vec<ModuleMetadata>,
     pub options: CompilerOptions,
 }
 
@@ -16,6 +18,7 @@ impl CompilerContext {
         Self {
             sources: SourceManager::new(),
             diagnostics: DiagnosticBag::new(),
+            resolved_modules: Vec::new(),
             options,
         }
     }

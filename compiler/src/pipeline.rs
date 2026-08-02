@@ -62,6 +62,13 @@ fn prepare_source(context: &mut CompilerContext, source_path: &Path) -> Pipeline
     let ast = parser.parse_program();
     context.diagnostics.extend(parser.diagnostics().iter().cloned());
 
+    let (constant_diagnostics, _constant_results) = semantic::evaluate_constants(&ast);
+    context.diagnostics.extend(constant_diagnostics);
+
+    let (module_diagnostics, resolved_modules) = semantic::resolve_modules(&mut context.sources, file_id, &ast);
+    context.diagnostics.extend(module_diagnostics);
+    context.resolved_modules = resolved_modules;
+
     let semantic_result = semantic::analyze(&ast);
     context.diagnostics.extend(semantic_result.diagnostics);
 
