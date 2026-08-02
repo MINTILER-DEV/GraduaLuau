@@ -42,9 +42,26 @@ pub enum SymbolNamespace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeOwner {
+    Root {
+        span: SourceSpan,
+    },
+    Function {
+        name: String,
+        span: SourceSpan,
+    },
+    Block {
+        kind: String,
+        span: SourceSpan,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
     pub id: ScopeId,
     pub parent: Option<ScopeId>,
+    pub children: Vec<ScopeId>,
+    pub owner: ScopeOwner,
     pub value_symbols: HashMap<String, SymbolId>,
     pub type_symbols: HashMap<String, SymbolId>,
 }
@@ -63,6 +80,8 @@ impl SymbolTable {
         scopes.push(Scope {
             id: root_scope,
             parent: None,
+            children: Vec::new(),
+            owner: ScopeOwner::Root { span: SourceSpan::new(FileId::new(0), 0, 0) },
             value_symbols: HashMap::new(),
             type_symbols: HashMap::new(),
         });
@@ -194,6 +213,7 @@ impl SymbolTableBuilder {
 
     pub fn build(mut self, program: &AstNode) -> (SymbolTable, Vec<Diagnostic>) {
         if let AstNode::Program(program) = program {
+            self.table.scopes[0].owner = ScopeOwner::Root { span: program.span };
             self.process_statements(&program.statements);
         }
         (self.table, self.diagnostics)
@@ -203,15 +223,18 @@ impl SymbolTableBuilder {
         *self.scope_stack.last().unwrap()
     }
 
-    fn enter_scope(&mut self) -> ScopeId {
+    fn enter_scope(&mut self, owner: ScopeOwner) -> ScopeId {
         let id = ScopeId(self.table.scopes.len());
         let parent = Some(self.current_scope());
         self.table.scopes.push(Scope {
             id,
             parent,
+            children: Vec::new(),
+            owner,
             value_symbols: HashMap::new(),
             type_symbols: HashMap::new(),
         });
+        self.table.scopes[parent.unwrap().0].children.push(id);
         self.scope_stack.push(id);
         id
     }
@@ -249,7 +272,7 @@ impl SymbolTableBuilder {
                     statement.span,
                 );
 
-                let _function_scope = self.enter_scope();
+                let _function_scope = self.enter_scope(ScopeOwner::Function { name: name.clone(), span: statement.span });
                 for (name, annotation) in params {
                     self.insert_symbol(
                         name.clone(),
@@ -413,6 +436,50 @@ mod tests {
         assert!(table.symbols.iter().any(|symbol| {
             symbol.name == "x" && symbol.kind == SymbolKind::Variable && symbol.declaring_scope != root
         }));
+    }
+
+    #[test]
+    fn function_scope_is_created_for_function_declarations() {
+        let (table, diagnostics) = build_symbol_table("function foo(a: number) local b = 2 end\n");
+        assert!(diagnostics.is_empty());
+
+        assert_eq!(table.scope_count(), 2);
+        let root_scope = &table.scopes[0];
+        assert_eq!(root_scope.children.len(), 1);
+        let function_scope_id = root_scope.children[0];
+        let function_scope = &table.scopes[function_scope_id.0];
+
+        match &function_scope.owner {
+            ScopeOwner::Function { name, span: _ } => assert_eq!(name, "foo"),
+            _ => panic!("Expected function scope owner"),
+        }
+
+        assert!(function_scope.value_symbols.contains_key("a"));
+        assert!(function_scope.value_symbols.contains_key("b"));
+        assert_eq!(function_scope.parent, Some(root_scope.id));
+    }
+
+    #[test]
+    fn nested_function_scopes_are_parented_correctly() {
+        let (table, diagnostics) = build_symbol_table("function outer() function inner() end end\n");
+        assert!(diagnostics.is_empty());
+
+        assert_eq!(table.scope_count(), 3);
+        let root_scope = &table.scopes[0];
+        assert_eq!(root_scope.children.len(), 1);
+
+        let outer_scope_id = root_scope.children[0];
+        let outer_scope = &table.scopes[outer_scope_id.0];
+        assert_eq!(outer_scope.children.len(), 1);
+
+        let inner_scope_id = outer_scope.children[0];
+        let inner_scope = &table.scopes[inner_scope_id.0];
+        assert_eq!(inner_scope.parent, Some(outer_scope.id));
+
+        match &inner_scope.owner {
+            ScopeOwner::Function { name, .. } => assert_eq!(name, "inner"),
+            _ => panic!("Expected inner function scope owner"),
+        }
     }
 
     #[test]
