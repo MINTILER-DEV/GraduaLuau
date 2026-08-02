@@ -205,4 +205,20 @@ mod tests {
         let resolved = resolver.resolve(&type_expr);
         assert_eq!(resolved.kind, ResolvedTypeKind::Primitive("number".to_string()));
     }
+
+    #[test]
+    fn resolves_optional_type_expression() {
+        let table = SymbolTable::new();
+        let mut resolver = TypeResolver::new(table);
+        let type_expr = TypeExpression {
+            kind: TypeExpressionKind::Optional(Box::new(TypeExpression {
+                kind: TypeExpressionKind::Named("string".to_string()),
+                span: SourceSpan::new(FileId::new(0), 0, 14),
+            })),
+            span: SourceSpan::new(FileId::new(0), 0, 21),
+        };
+
+        let resolved = resolver.resolve(&type_expr);
+        assert_eq!(resolved.kind, ResolvedTypeKind::Optional(Box::new(ResolvedTypeKind::Primitive("string".to_string()))));
+    }
 }

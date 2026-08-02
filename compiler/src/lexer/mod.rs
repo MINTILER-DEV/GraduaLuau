@@ -88,13 +88,6 @@ pub enum TokenKind {
     Unknown(char),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LexerState {
-    Normal,
-    InterpolatedStringBody,
-    InInterpolation { brace_depth: usize },
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
@@ -105,16 +98,13 @@ pub struct Lexer<'a> {
     file: &'a SourceFile,
     src: &'a str,
     pos: usize,
-    len: usize,
-    state: LexerState,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(file: &'a SourceFile) -> Self {
         let src = file.text();
-        let len = src.len();
 
-        Self { file, src, pos: 0, len, state: LexerState::Normal }
+        Self { file, src, pos: 0 }
     }
 
     fn current_byte(&self) -> Option<u8> {
@@ -331,15 +321,6 @@ impl<'a> Lexer<'a> {
 fn is_alpha(b: u8) -> bool { (b'A'..=b'Z').contains(&b) || (b'a'..=b'z').contains(&b) }
 fn is_digit(b: u8) -> bool { (b'0'..=b'9').contains(&b) }
 fn is_whitespace(b: u8) -> bool { b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' }
-
-fn is_keyword(s: &str) -> bool {
-    // simple check; detailed mapping handled by `keyword_token`
-    matches!(s,
-        "and"|"break"|"do"|"else"|"elseif"|"end"|"false"|"for"|"function"|"if"|"in"|
-        "local"|"nil"|"not"|"or"|"repeat"|"return"|"then"|"true"|"until"|"while"|
-        "type"|"export"|"any"|"never"|"typeof"
-    )
-}
 
 fn keyword_token(s: &str) -> Option<TokenKind> {
     Some(match s {
