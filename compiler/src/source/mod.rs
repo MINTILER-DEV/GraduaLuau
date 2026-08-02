@@ -9,8 +9,8 @@ pub struct SourceManager {
     files: Vec<SourceFile>,
     // map normalized paths to file ids to prevent duplicate loads
     path_map: HashMap<PathBuf, FileId>,
-    // module request cache (e.g. "./math" -> FileId)
-    module_cache: HashMap<String, FileId>,
+    // module request cache keyed by normalized module path
+    module_cache: HashMap<PathBuf, FileId>,
     // stack of paths currently being resolved (for cycle detection)
     resolving: Vec<PathBuf>,
 }
@@ -90,6 +90,10 @@ impl SourceManager {
 
         let norm = normalize_path(&candidate);
 
+        if let Some(&id) = self.module_cache.get(&norm) {
+            return Ok(id);
+        }
+
         // Cycle detection: if we're already resolving this path, report a cycle
         if self.resolving.iter().any(|p| p == &norm) {
             let mut chain = self.resolving.clone();
@@ -98,8 +102,7 @@ impl SourceManager {
         }
 
         if let Some(&id) = self.path_map.get(&norm) {
-            // cache the module request for quick future lookups
-            self.module_cache.insert(module.to_string(), id);
+            self.module_cache.insert(norm.clone(), id);
             return Ok(id);
         }
 
@@ -115,7 +118,7 @@ impl SourceManager {
 
         let id = self.add_file(candidate, text);
         self.resolving.pop();
-        self.module_cache.insert(module.to_string(), id);
+        self.module_cache.insert(norm.clone(), id);
 
         Ok(id)
     }

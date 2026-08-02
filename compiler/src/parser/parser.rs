@@ -640,6 +640,9 @@ impl<'a> Parser<'a> {
                     unreachable!()
                 }
             }
+            Some(TokenKind::LeftBrace) => {
+                self.parse_table_constructor()
+            }
             Some(TokenKind::True) | Some(TokenKind::False) | Some(TokenKind::Nil) => {
                 let current = self.current().unwrap();
                 let kind = match current.kind {

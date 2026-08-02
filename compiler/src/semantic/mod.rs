@@ -1,5 +1,7 @@
+pub mod constant_evaluation;
 pub mod control_flow_analysis;
 pub mod function_validation;
+pub mod module_resolution;
 pub mod name_resolution;
 pub mod symbol_table;
 pub mod type_checking;
@@ -8,9 +10,12 @@ pub mod variable_validation;
 
 use crate::diagnostics::Diagnostic;
 use crate::parser::ast_builder::AstNode;
+use crate::source::{FileId, SourceManager};
 
+pub use constant_evaluation::*;
 pub use control_flow_analysis::*;
 pub use function_validation::*;
+pub use module_resolution::*;
 pub use symbol_table::*;
 pub use name_resolution::*;
 pub use type_checking::*;
@@ -56,4 +61,12 @@ pub fn analyze(program: &AstNode) -> SemanticAnalysisResult {
         variable_metadata,
         control_flow_metadata,
     }
+}
+
+pub fn evaluate_constants(program: &AstNode) -> (Vec<Diagnostic>, Vec<ConstantEvaluationResult>) {
+    ConstantEvaluator::new(SymbolTable::new()).evaluate(program)
+}
+
+pub fn resolve_modules(sources: &mut SourceManager, file_id: FileId, ast: &AstNode) -> (Vec<Diagnostic>, Vec<ModuleMetadata>) {
+    ModuleResolver::new(sources).resolve(file_id, ast)
 }

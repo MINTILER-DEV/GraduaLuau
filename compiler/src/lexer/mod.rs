@@ -149,10 +149,11 @@ impl<'a> Lexer<'a> {
                     let s = self.read_number();
                     let end = self.pos;
                     Token { kind: TokenKind::NumberLiteral(s), span: self.make_span(start, end) }
-                } else if b == b'"' {
-                    // string literal
-                    self.advance(); // consume '"'
-                    let s = self.read_string();
+                } else if b == b'"' || b == b'\'' {
+                    // string literal (double or single quoted)
+                    let quote = b;
+                    self.advance(); // consume quote
+                    let s = self.read_string(quote);
                     let end = self.pos;
                     Token { kind: TokenKind::StringLiteral(s), span: self.make_span(start, end) }
                 } else if b == b'`' {
@@ -259,10 +260,10 @@ impl<'a> Lexer<'a> {
         self.src[start..self.pos].to_string()
     }
 
-    fn read_string(&mut self) -> String {
+    fn read_string(&mut self, quote: u8) -> String {
         let mut out = String::new();
         while let Some(b) = self.current_byte() {
-            if b == b'"' { self.advance(); break; }
+            if b == quote { self.advance(); break; }
             if b == b'\\' {
                 self.advance();
                 if let Some(esc) = self.advance() {
@@ -272,6 +273,7 @@ impl<'a> Lexer<'a> {
                         b't' => out.push('\t'),
                         b'\\' => out.push('\\'),
                         b'"' => out.push('"'),
+                        b'\'' => out.push('\''),
                         other => out.push(other as char),
                     }
                 }
