@@ -57,6 +57,10 @@ path = "../tests/llvm/mod.rs"
 name = "optimization"
 path = "../tests/optimization/mod.rs"
 
+[[test]]
+name = "runtime"
+path = "../tests/runtime/mod.rs"
+
 [dependencies]
 
 [dev-dependencies]

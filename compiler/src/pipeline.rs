@@ -65,9 +65,15 @@ fn generate_executable(context: &CompilerContext, ast: &crate::parser::ast_build
             .with_note(error.to_string())
     })?;
 
-    RuntimeStage::link(&context.options.output_path, &optimized_module).map_err(|error| {
-        Diagnostic::error("failed to generate executable").with_note(error.to_string())
+    // Generate executable with diagnostics
+    let mut runtime_stage = RuntimeStage::new();
+    let diagnostics = runtime_stage.link(&context.options.output_path, &optimized_module).map_err(|error| {
+        Diagnostic::error("Runtime linking failed")
+            .with_note(error.to_string())
     })?;
+    
+    // Print build diagnostics
+    println!("{}", diagnostics.format());
 
     Ok(())
 }
