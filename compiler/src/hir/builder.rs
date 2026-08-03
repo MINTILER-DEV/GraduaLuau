@@ -30,17 +30,35 @@ impl HirBuilder {
     
     fn lower_program(&mut self, program: &crate::parser::ast_builder::Program) -> Result<HirModule, HirError> {
         let mut module = HirModule::new("main".to_string(), program.span);
+        let mut entry_statements = Vec::new();
         
         for statement in &program.statements {
-            self.lower_statement_to_module(statement, &mut module)?;
+            self.lower_statement_to_module(statement, &mut module, &mut entry_statements)?;
+        }
+
+        if !entry_statements.is_empty() && !module.functions.iter().any(|function| function.name == "main") {
+            let entry_function = HirFunction {
+                id: HirFunctionId::new(self.function_counter),
+                name: "main".to_string(),
+                parameters: Vec::new(),
+                body: entry_statements,
+                return_type: None,
+                is_local: false,
+                span: program.span,
+            };
+            self.function_counter += 1;
+            module.functions.push(entry_function);
         }
         
         Ok(module)
     }
     
-    fn lower_statement_to_module(&mut self, stmt: &crate::parser::ast_builder::Statement, module: &mut HirModule) -> Result<(), HirError> {
-        use super::module::HirGlobalVariable;
-        
+    fn lower_statement_to_module(
+        &mut self,
+        stmt: &crate::parser::ast_builder::Statement,
+        module: &mut HirModule,
+        entry_statements: &mut Vec<HirStatement>,
+    ) -> Result<(), HirError> {
         match &stmt.kind {
             crate::parser::ast_builder::StatementKind::Function {
                 name,
@@ -53,19 +71,11 @@ impl HirBuilder {
                 let function = self.lower_function(name, receiver, params, return_type, body, *is_local, stmt.span)?;
                 module.functions.push(function);
             }
-            crate::parser::ast_builder::StatementKind::Local { names, initializers } => {
-                if !names.is_empty() {
-                    let global = HirGlobalVariable {
-                        name: names[0].0.clone(),
-                        var_type: None,
-                        initializer: initializers.first().map(|expr| self.lower_expression(expr)),
-                        span: stmt.span,
-                    };
-                    module.global_variables.push(global);
-                }
-            }
             _ => {
-                // Skip other statements at module level for now
+                let lowered = self.lower_statement(stmt)?;
+                if !matches!(lowered.kind, HirStatementKind::Block(ref statements) if statements.is_empty()) {
+                    entry_statements.push(lowered);
+                }
             }
         }
         

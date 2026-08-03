@@ -168,6 +168,18 @@ end
 }
 
 #[test]
+fn test_top_level_print_generates_main() {
+    let source = r#"print "Hello, GraduaLuau!""#;
+    let result = compile_to_llvm(source);
+    assert!(result.is_ok());
+    let llvm = result.unwrap();
+    assert!(llvm.ir.contains("define"));
+    assert!(llvm.ir.contains("@main"));
+    assert!(llvm.ir.contains("glua_print"));
+    assert!(llvm.ir.contains("Hello, GraduaLuau"));
+}
+
+#[test]
 fn test_table_operations() {
     let source = r#"
 function create_table()

@@ -5,18 +5,31 @@ use crate::mir::instruction::{MirInstruction, MirInstructionKind};
 use crate::mir::types::{MirValue, MirType};
 use crate::llvm::error::LlvmError;
 use crate::llvm::types::{LlvmType, map_mir_type};
+use std::collections::HashMap;
 
 pub struct LlvmGenerator {
     module_name: String,
+    string_constants: Vec<StringConstant>,
+    string_constant_names: HashMap<String, String>,
+}
+
+struct StringConstant {
+    name: String,
+    value: String,
 }
 
 impl LlvmGenerator {
     pub fn new(module_name: String) -> Self {
-        Self { module_name }
+        Self {
+            module_name,
+            string_constants: Vec::new(),
+            string_constant_names: HashMap::new(),
+        }
     }
     
     pub fn generate(&mut self, mir: &MirModule) -> Result<String, LlvmError> {
         let mut ir = String::new();
+        let mut functions_ir = String::new();
         
         // Module header
         ir.push_str(&format!("; Module ID: '{}'\n", self.module_name));
@@ -26,11 +39,30 @@ impl LlvmGenerator {
         
         // Generate function declarations
         self.generate_runtime_declarations(&mut ir);
-        
+
         // Generate functions
         for function in &mir.functions {
-            self.generate_function(function, &mut ir)?;
+            self.generate_function(function, &mut functions_ir)?;
         }
+
+        // Emit string constants before function definitions
+        for string_constant in &self.string_constants {
+            let escaped = Self::escape_llvm_bytes(string_constant.value.as_bytes());
+            let length = string_constant.value.as_bytes().len() + 1;
+            ir.push_str(&format!(
+                "@{} = private unnamed_addr constant [{} x i8] c\"{}\\00\", align 1\n",
+                string_constant.name,
+                length,
+                escaped
+            ));
+        }
+
+        if !self.string_constants.is_empty() {
+            ir.push('\n');
+        }
+
+        // Generate functions
+        ir.push_str(&functions_ir);
         
         Ok(ir)
     }
@@ -44,7 +76,7 @@ impl LlvmGenerator {
         ir.push_str("\n");
     }
     
-    fn generate_function(&self, function: &MirFunction, ir: &mut String) -> Result<(), LlvmError> {
+    fn generate_function(&mut self, function: &MirFunction, ir: &mut String) -> Result<(), LlvmError> {
         let return_type = map_mir_type(function.return_type.as_ref().unwrap_or(&MirType::Void));
         
         // Function signature
@@ -68,7 +100,7 @@ impl LlvmGenerator {
         Ok(())
     }
     
-    fn generate_block(&self, block: &MirBasicBlock, ir: &mut String) -> Result<(), LlvmError> {
+    fn generate_block(&mut self, block: &MirBasicBlock, ir: &mut String) -> Result<(), LlvmError> {
         let block_label = if block.is_entry {
             "entry".to_string()
         } else {
@@ -84,14 +116,29 @@ impl LlvmGenerator {
         Ok(())
     }
     
-    fn generate_instruction(&self, instruction: &MirInstruction, ir: &mut String) -> Result<(), LlvmError> {
+    fn generate_instruction(&mut self, instruction: &MirInstruction, ir: &mut String) -> Result<(), LlvmError> {
         ir.push_str("    ");
         
         match &instruction.kind {
             MirInstructionKind::Const { result, value } => {
-                let value_str = self.mir_value_to_llvm(value);
-                let llvm_type = self.mir_value_type(value);
-                ir.push_str(&format!("%{} = {} {}\n", result.0, llvm_type.to_string(), value_str));
+                match value {
+                    MirValue::String(string_value) => {
+                        let global_name = self.intern_string_constant(string_value.clone());
+                        let length = string_value.as_bytes().len() + 1;
+                        ir.push_str(&format!(
+                            "%{} = getelementptr inbounds [{} x i8], [{} x i8]* @{}, i64 0, i64 0\n",
+                            result.0,
+                            length,
+                            length,
+                            global_name
+                        ));
+                    }
+                    _ => {
+                        let value_str = self.mir_value_to_llvm(value);
+                        let llvm_type = self.mir_value_type(value);
+                        ir.push_str(&format!("%{} = {} {}\n", result.0, llvm_type.to_string(), value_str));
+                    }
+                }
             }
             
             MirInstructionKind::Add { result, left, right } => {
@@ -205,6 +252,17 @@ impl LlvmGenerator {
         
         Ok(())
     }
+
+    fn intern_string_constant(&mut self, value: String) -> String {
+        if let Some(name) = self.string_constant_names.get(&value) {
+            return name.clone();
+        }
+
+        let name = format!(".str{}", self.string_constants.len());
+        self.string_constant_names.insert(value.clone(), name.clone());
+        self.string_constants.push(StringConstant { name: name.clone(), value });
+        name
+    }
     
     fn mir_value_to_llvm(&self, value: &MirValue) -> String {
         match value {
@@ -226,5 +284,23 @@ impl LlvmGenerator {
             MirValue::Nil => LlvmType::Pointer(Box::new(LlvmType::Integer(8))),
             MirValue::Unit => LlvmType::Void,
         }
+    }
+
+    fn escape_llvm_bytes(bytes: &[u8]) -> String {
+        let mut output = String::new();
+
+        for byte in bytes {
+            match byte {
+                b'\\' => output.push_str("\\5C"),
+                b'"' => output.push_str("\\22"),
+                b'\n' => output.push_str("\\0A"),
+                b'\r' => output.push_str("\\0D"),
+                b'\t' => output.push_str("\\09"),
+                0x20..=0x7E => output.push(*byte as char),
+                other => output.push_str(&format!("\\{:02X}", other)),
+            }
+        }
+
+        output
     }
 }

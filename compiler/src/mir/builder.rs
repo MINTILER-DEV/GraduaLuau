@@ -405,6 +405,34 @@ impl MirBuilder {
                     result_type: Some(MirType::Any),
                 }
             }
+
+            HirExpressionKind::BuiltinCall { function, arguments } => {
+                let mut arg_ids = Vec::new();
+                for arg in arguments {
+                    arg_ids.push(self.lower_expression(arg, mir_function, block_index)?);
+                }
+
+                let function_name = match function {
+                    crate::hir::types::HirBuiltinFunction::Print => "glua_print",
+                    crate::hir::types::HirBuiltinFunction::Type => "glua_type",
+                    crate::hir::types::HirBuiltinFunction::ToNumber => "glua_tonumber",
+                    crate::hir::types::HirBuiltinFunction::ToString => "glua_tostring",
+                    crate::hir::types::HirBuiltinFunction::Error => "glua_error",
+                    crate::hir::types::HirBuiltinFunction::Pairs => "glua_pairs",
+                    crate::hir::types::HirBuiltinFunction::Ipairs => "glua_ipairs",
+                    crate::hir::types::HirBuiltinFunction::Require => "glua_require",
+                }
+                .to_string();
+
+                MirInstruction {
+                    kind: MirInstructionKind::Call {
+                        result: None,
+                        function: function_name,
+                        arguments: arg_ids,
+                    },
+                    result_type: Some(MirType::Void),
+                }
+            }
             
             HirExpressionKind::TableConstructor(_) => {
                 MirInstruction {
