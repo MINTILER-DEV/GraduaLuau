@@ -39,8 +39,9 @@ impl MirStage {
         let mut validator = MirValidator::new();
         if let Err(validation_errors) = validator.validate(&mir_module) {
             return Err(MirError::ValidationError(format!(
-                "MIR validation failed with {} errors",
-                validation_errors.len()
+                "MIR validation failed with {} errors: {:?}",
+                validation_errors.len(),
+                validation_errors
             )));
         }
         

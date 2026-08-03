@@ -1,0 +1,12 @@
+print "=== GraduaLuau Demo ==="
+
+function greet()
+    print "Hello, GraduaLuau!"
+end
+
+function square()
+    print "Square demo"
+end
+
+greet()
+square()

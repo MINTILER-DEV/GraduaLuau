@@ -97,7 +97,30 @@ impl MirBuilder {
             }
             
             HirStatementKind::Expression(expr) => {
-                self.lower_expression(expr, mir_function, block_index)?;
+                if let HirExpressionKind::FunctionCall { callee, arguments } = &expr.kind {
+                    let mut arg_ids = Vec::new();
+                    for arg in arguments {
+                        arg_ids.push(self.lower_expression(arg, mir_function, block_index)?);
+                    }
+
+                    let function_name = if let HirExpressionKind::GlobalVariable(name) = &callee.kind {
+                        name.clone()
+                    } else {
+                        "unknown".to_string()
+                    };
+
+                    let call_instr = MirInstruction {
+                        kind: MirInstructionKind::Call {
+                            result: None,
+                            function: function_name,
+                            arguments: arg_ids,
+                        },
+                        result_type: Some(MirType::Void),
+                    };
+                    mir_function.add_instruction(block_index, call_instr);
+                } else {
+                    self.lower_expression(expr, mir_function, block_index)?;
+                }
             }
             
             HirStatementKind::Return(exprs) => {
