@@ -48,7 +48,10 @@ fn generate_executable(context: &CompilerContext, ast: &crate::parser::ast_build
         Diagnostic::error("HIR lowering failed")
             .with_note(error.to_string())
     })?;
-    let mir = MirStage::lower(&hir);
+    let mir = MirStage::lower(&hir).map_err(|error| {
+        Diagnostic::error("MIR lowering failed")
+            .with_note(error.to_string())
+    })?;
     let llvm_module = LlvmStage::generate(&mir);
 
     RuntimeStage::link(&context.options.output_path, &llvm_module).map_err(|error| {
