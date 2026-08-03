@@ -87,6 +87,12 @@ pub struct EmitOptions {
     pub tokens: bool,
 }
 
+impl EmitOptions {
+    pub fn any(self) -> bool {
+        self.llvm || self.hir || self.mir || self.ast || self.tokens
+    }
+}
+
 fn default_target_triple() -> String {
     if cfg!(all(target_os = "windows", target_env = "msvc")) {
         return format!("{}-pc-windows-msvc", std::env::consts::ARCH);

@@ -61,6 +61,10 @@ path = "../tests/optimization/mod.rs"
 name = "runtime"
 path = "../tests/runtime/mod.rs"
 
+[[test]]
+name = "emit"
+path = "../tests/emit/mod.rs"
+
 [dependencies]
 
 [dev-dependencies]

@@ -61,11 +61,11 @@ Options:
   -o <path>       Specify output file
   --release      Use release build options
   --debug        Use debug build options
-  --emit-llvm    Reserve LLVM IR output
-  --emit-hir     Reserve HIR output
-  --emit-mir     Reserve MIR output
-  --emit-ast     Reserve AST output
-  --emit-tokens  Reserve token output
+  --emit-llvm    Write LLVM IR output
+  --emit-hir     Write HIR output
+  --emit-mir     Write MIR output
+  --emit-ast     Write AST output
+  --emit-tokens  Write token output
   --verbose      Enable debug logging
   --trace        Enable trace logging
 "

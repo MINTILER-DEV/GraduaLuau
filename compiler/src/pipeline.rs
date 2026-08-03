@@ -1,12 +1,14 @@
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::context::CompilerContext;
 use crate::diagnostics::Diagnostic;
-use crate::hir::HirStage;
-use crate::llvm::LlvmStage;
-use crate::lexer::{Lexer, TokenKind};
-use crate::mir::MirStage;
+use crate::hir::{HirModule, HirPrinter, HirStage};
+use crate::lexer::{Lexer, Token, TokenKind};
+use crate::llvm::{LlvmModule, LlvmStage};
+use crate::mir::{MirModule, MirPrinter, MirStage};
 use crate::optimization::OptimizationStage;
+use crate::parser::ast_builder::AstNode;
 use crate::parser::Parser;
 use crate::runtime::RuntimeStage;
 use crate::semantic;
@@ -19,8 +21,11 @@ pub enum PipelineKind {
 }
 
 pub fn build(context: &mut CompilerContext, source_path: &Path) -> PipelineResult {
-    let (_file_id, ast) = prepare_source(context, source_path)?;
-    generate_executable(context, &ast)?;
+    let prepared = prepare_source(context, source_path)?;
+    let compilation = compile_for_native(&prepared.ast)?;
+
+    emit_requested_artifacts(context, &prepared, &compilation)?;
+    generate_executable(context, &compilation.optimized_module)?;
 
     Ok(PipelineOutput {
         kind: PipelineKind::Build,
@@ -28,8 +33,11 @@ pub fn build(context: &mut CompilerContext, source_path: &Path) -> PipelineResul
 }
 
 pub fn run(context: &mut CompilerContext, source_path: &Path) -> PipelineResult {
-    let (_file_id, ast) = prepare_source(context, source_path)?;
-    generate_executable(context, &ast)?;
+    let prepared = prepare_source(context, source_path)?;
+    let compilation = compile_for_native(&prepared.ast)?;
+
+    emit_requested_artifacts(context, &prepared, &compilation)?;
+    generate_executable(context, &compilation.optimized_module)?;
 
     Ok(PipelineOutput {
         kind: PipelineKind::Run,
@@ -37,48 +45,108 @@ pub fn run(context: &mut CompilerContext, source_path: &Path) -> PipelineResult 
 }
 
 pub fn check(context: &mut CompilerContext, source_path: &Path) -> PipelineResult {
-    let _ = prepare_source(context, source_path)?;
+    let prepared = prepare_source(context, source_path)?;
+
+    if context.options.emit.any() {
+        let compilation = compile_for_native(&prepared.ast)?;
+        emit_requested_artifacts(context, &prepared, &compilation)?;
+    }
 
     Ok(PipelineOutput {
         kind: PipelineKind::Check,
     })
 }
 
-fn generate_executable(context: &CompilerContext, ast: &crate::parser::ast_builder::AstNode) -> Result<(), Diagnostic> {
-    let hir = HirStage::lower(ast).map_err(|error| {
-        Diagnostic::error("HIR lowering failed")
-            .with_note(error.to_string())
-    })?;
-    let mir = MirStage::lower(&hir).map_err(|error| {
-        Diagnostic::error("MIR lowering failed")
-            .with_note(error.to_string())
-    })?;
-    let llvm_module = LlvmStage::generate(&mir).map_err(|error| {
-        Diagnostic::error("LLVM generation failed")
-            .with_note(error.to_string())
-    })?;
-    
-    // Run optimization
+fn compile_for_native(ast: &AstNode) -> Result<CompilationArtifacts, Diagnostic> {
+    let hir = HirStage::lower(ast)
+        .map_err(|error| Diagnostic::error("HIR lowering failed").with_note(error.to_string()))?;
+    let mir = MirStage::lower(&hir)
+        .map_err(|error| Diagnostic::error("MIR lowering failed").with_note(error.to_string()))?;
+    let llvm_module = LlvmStage::generate(&mir)
+        .map_err(|error| Diagnostic::error("LLVM generation failed").with_note(error.to_string()))?;
+
     let optimization_stage = OptimizationStage::default();
     let optimized_module = optimization_stage.optimize(&llvm_module).map_err(|error| {
-        Diagnostic::error("Optimization failed")
-            .with_note(error.to_string())
+        Diagnostic::error("Optimization failed").with_note(error.to_string())
     })?;
 
-    // Generate executable with diagnostics
+    Ok(CompilationArtifacts {
+        hir,
+        mir,
+        llvm_module,
+        optimized_module,
+    })
+}
+
+fn generate_executable(context: &CompilerContext, optimized_module: &LlvmModule) -> Result<(), Diagnostic> {
     let mut runtime_stage = RuntimeStage::new();
-    let diagnostics = runtime_stage.link(&context.options.output_path, &optimized_module).map_err(|error| {
-        Diagnostic::error("Runtime linking failed")
-            .with_note(error.to_string())
-    })?;
-    
-    // Print build diagnostics
+    let diagnostics = runtime_stage
+        .link(&context.options.output_path, optimized_module)
+        .map_err(|error| Diagnostic::error("Runtime linking failed").with_note(error.to_string()))?;
+
     println!("{}", diagnostics.format());
+    Ok(())
+}
+
+fn emit_requested_artifacts(
+    context: &CompilerContext,
+    prepared: &PreparedSource,
+    compilation: &CompilationArtifacts,
+) -> Result<(), Diagnostic> {
+    if context.options.emit.tokens {
+        let path = emission_path(&context.options.output_path, "tokens");
+        write_emitted_file(&path, format!("{:#?}", prepared.tokens), "tokens")?;
+    }
+
+    if context.options.emit.ast {
+        let path = emission_path(&context.options.output_path, "ast");
+        write_emitted_file(&path, format!("{:#?}", prepared.ast), "AST")?;
+    }
+
+    if context.options.emit.hir {
+        let mut printer = HirPrinter::new();
+        let path = emission_path(&context.options.output_path, "hir");
+        write_emitted_file(&path, printer.print_module(&compilation.hir), "HIR")?;
+    }
+
+    if context.options.emit.mir {
+        let mut printer = MirPrinter::new();
+        let path = emission_path(&context.options.output_path, "mir");
+        write_emitted_file(&path, printer.print_module(&compilation.mir), "MIR")?;
+    }
+
+    if context.options.emit.llvm {
+        let path = emission_path(&context.options.output_path, "ll");
+        write_emitted_file(&path, compilation.llvm_module.ir.clone(), "LLVM IR")?;
+    }
 
     Ok(())
 }
 
-fn prepare_source(context: &mut CompilerContext, source_path: &Path) -> Result<(crate::source::FileId, crate::parser::ast_builder::AstNode), Diagnostic> {
+fn write_emitted_file(path: &Path, contents: String, label: &str) -> Result<(), Diagnostic> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            Diagnostic::error(format!("failed to emit {label}"))
+                .with_note(error.to_string())
+                .with_note(format!("output: {}", path.display()))
+        })?;
+    }
+
+    fs::write(path, contents).map_err(|error| {
+        Diagnostic::error(format!("failed to emit {label}"))
+            .with_note(error.to_string())
+            .with_note(format!("output: {}", path.display()))
+    })
+}
+
+fn emission_path(output_path: &Path, extension: &str) -> PathBuf {
+    output_path.with_extension(extension)
+}
+
+fn prepare_source(
+    context: &mut CompilerContext,
+    source_path: &Path,
+) -> Result<PreparedSource, Diagnostic> {
     let file_id = context.sources.load_file(source_path).map_err(|error| {
         Diagnostic::error(format!("could not load '{}'", source_path.display()))
             .with_note(error.to_string())
@@ -123,7 +191,7 @@ fn prepare_source(context: &mut CompilerContext, source_path: &Path) -> Result<(
         return Err(diagnostic);
     }
 
-    Ok((file_id, ast))
+    Ok(PreparedSource { tokens, ast })
 }
 
 pub type PipelineResult = Result<PipelineOutput, Diagnostic>;
@@ -131,4 +199,18 @@ pub type PipelineResult = Result<PipelineOutput, Diagnostic>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineOutput {
     pub kind: PipelineKind,
+}
+
+#[derive(Debug)]
+struct PreparedSource {
+    tokens: Vec<Token>,
+    ast: AstNode,
+}
+
+#[derive(Debug)]
+struct CompilationArtifacts {
+    hir: HirModule,
+    mir: MirModule,
+    llvm_module: LlvmModule,
+    optimized_module: LlvmModule,
 }
