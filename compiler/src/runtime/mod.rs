@@ -32,6 +32,11 @@ impl RuntimeStage {
     ) -> Result<BuildDiagnostics, io::Error> {
         let start_time = Instant::now();
         self.diagnostics = BuildDiagnostics::new();
+        let absolute_output_path = if output_path.is_absolute() {
+            output_path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(output_path)
+        };
 
         if let Some(parent) = output_path.parent() {
             fs::create_dir_all(parent)?;
@@ -129,7 +134,7 @@ impl RuntimeStage {
             &[
                 ("GLUAU_PROGRAM_OBJECT", &program_object_path),
                 ("GLUAU_RUNTIME_OBJECT", &runtime_object_path),
-                ("GLUAU_OUTPUT_PATH", output_path),
+                ("GLUAU_OUTPUT_PATH", &absolute_output_path),
             ],
         )?;
 
@@ -151,14 +156,14 @@ impl RuntimeStage {
             name: "Link Executable".to_string(),
             status: BuildStatus::Success,
             duration_ms: link_start.elapsed().as_millis() as u64,
-            message: format!("Produced executable {}", output_path.display()),
+            message: format!("Produced executable {}", absolute_output_path.display()),
         });
         self.diagnostics
             .add_linked_library("gradualuau_runtime".to_string());
         self.diagnostics.add_linked_library("c_runtime".to_string());
 
         let validate_start = Instant::now();
-        let validation_success = self.validate_executable(output_path);
+        let validation_success = self.validate_executable(&absolute_output_path);
         self.diagnostics.add_stage(BuildStage {
             name: "Validation".to_string(),
             status: if validation_success {
