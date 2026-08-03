@@ -1,5 +1,6 @@
 use compiler::llvm::LlvmModule;
 use compiler::runtime::{BuildDiagnostics, BuildStage, BuildStatus, RuntimeStage};
+use std::process::Command;
 
 #[test]
 fn test_runtime_stage_creation() {
@@ -74,19 +75,53 @@ fn test_build_diagnostics_format() {
 #[test]
 fn test_runtime_linking() {
     let llvm_module = LlvmModule {
-        ir: "define i32 @main() {\nentry:\n    ret i32 0\n}".to_string(),
+        ir: r#"; ModuleID = 'runtime_test'
+target triple = "x86_64-unknown-linux-gnu"
+target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128"
+
+@message = private unnamed_addr constant [23 x i8] c"Hello from GraduaLuau\0A\00", align 1
+
+declare void @glua_print(i8*)
+
+define i32 @main() {
+entry:
+    %message_ptr = getelementptr inbounds [23 x i8], [23 x i8]* @message, i64 0, i64 0
+    call void @glua_print(i8* %message_ptr)
+    ret i32 0
+}
+"#
+        .to_string(),
     };
 
     let mut stage = RuntimeStage::new();
     let temp_dir = std::env::temp_dir();
-    let output_path = temp_dir.join("test_gradualuau.exe");
+    let output_path = temp_dir.join(format!(
+        "test_gradualuau_{}.exe",
+        std::process::id()
+    ));
 
-    let result = stage.link(&output_path, &llvm_module);
+    let diagnostics = stage.link(&output_path, &llvm_module).expect("runtime link should succeed");
 
-    if let Ok(diagnostics) = result {
-        assert!(!diagnostics.has_errors());
-        assert!(diagnostics.stages.len() >= 2);
-    }
+    assert!(!diagnostics.has_errors());
+    assert!(diagnostics.stages.len() >= 4);
+    assert!(diagnostics
+        .object_files
+        .iter()
+        .any(|path| path.ends_with("program.o")));
+    assert!(diagnostics
+        .linked_libraries
+        .iter()
+        .any(|library| library == "gradualuau_runtime"));
+
+    let exe_output = Command::new(&output_path)
+        .output()
+        .expect("generated executable should run");
+    assert!(exe_output.status.success());
+    assert!(
+        String::from_utf8_lossy(&exe_output.stdout).contains("Hello from GraduaLuau"),
+        "executable stdout was: {}",
+        String::from_utf8_lossy(&exe_output.stdout)
+    );
 
     let _ = std::fs::remove_file(&output_path);
 }
