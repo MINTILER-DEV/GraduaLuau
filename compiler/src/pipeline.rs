@@ -52,7 +52,10 @@ fn generate_executable(context: &CompilerContext, ast: &crate::parser::ast_build
         Diagnostic::error("MIR lowering failed")
             .with_note(error.to_string())
     })?;
-    let llvm_module = LlvmStage::generate(&mir);
+    let llvm_module = LlvmStage::generate(&mir).map_err(|error| {
+        Diagnostic::error("LLVM generation failed")
+            .with_note(error.to_string())
+    })?;
 
     RuntimeStage::link(&context.options.output_path, &llvm_module).map_err(|error| {
         Diagnostic::error("failed to generate executable").with_note(error.to_string())

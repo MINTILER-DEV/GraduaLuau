@@ -1,3 +1,19 @@
+// LLVM Module Structure
+// =====================
+// This module provides the LLVM IR backend for the GraduaLuau compiler.
+// It translates MIR into LLVM Intermediate Representation for code generation.
+
+pub mod error;
+pub mod types;
+pub mod generator;
+pub mod verifier;
+
+// Re-export commonly used types for convenience
+pub use error::{LlvmError};
+pub use types::{LlvmType, map_mir_type};
+pub use generator::LlvmGenerator;
+pub use verifier::LlvmVerifier;
+
 use crate::mir::MirModule;
 
 #[derive(Debug, Clone)]
@@ -9,16 +25,13 @@ pub struct LlvmModule {
 pub struct LlvmStage;
 
 impl LlvmStage {
-    pub fn generate(mir: &MirModule) -> LlvmModule {
-        let mut ir = String::new();
-        ir.push_str("; LLVM IR generated from MIR\n");
-        ir.push_str(&format!("; Module: {}\n", mir.name));
-        ir.push_str(&format!("; Functions: {}\n", mir.functions.len()));
+    pub fn generate(mir: &MirModule) -> Result<LlvmModule, LlvmError> {
+        let mut generator = LlvmGenerator::new(mir.name.clone());
+        let ir = generator.generate(mir)?;
         
-        for function in &mir.functions {
-            ir.push_str(&format!("; Function: {} with {} blocks\n", function.name, function.blocks.len()));
-        }
+        // Verify the generated LLVM IR
+        LlvmVerifier::verify(&ir)?;
         
-        LlvmModule { ir }
+        Ok(LlvmModule { ir })
     }
 }

@@ -19,7 +19,7 @@ impl RuntimeStage {
         let executable_marker = output_path.display();
 
         let source = format!(
-            "fn main() {{\n    println!(r\"GraduaLuau native executable generated at: {}\");\n    println!(\"LLVM IR stub length: {}\");\n}}\n",
+            "fn main() {{\n    println!(r\"GraduaLuau native executable generated at: {}\");\n    println!(\"LLVM IR length: {}\");\n}}\n",
             executable_marker,
             llvm_module.ir.len()
         );
