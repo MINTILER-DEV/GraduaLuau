@@ -53,6 +53,10 @@ path = "../tests/mir/mod.rs"
 name = "llvm"
 path = "../tests/llvm/mod.rs"
 
+[[test]]
+name = "optimization"
+path = "../tests/optimization/mod.rs"
+
 [dependencies]
 
 [dev-dependencies]

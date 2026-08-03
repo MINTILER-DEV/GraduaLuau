@@ -6,6 +6,7 @@ pub mod hir;
 pub mod lexer;
 pub mod llvm;
 pub mod mir;
+pub mod optimization;
 pub mod parser;
 pub mod pipeline;
 pub mod runtime;

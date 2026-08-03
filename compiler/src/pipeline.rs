@@ -6,6 +6,7 @@ use crate::hir::HirStage;
 use crate::llvm::LlvmStage;
 use crate::lexer::{Lexer, TokenKind};
 use crate::mir::MirStage;
+use crate::optimization::OptimizationStage;
 use crate::parser::Parser;
 use crate::runtime::RuntimeStage;
 use crate::semantic;
@@ -56,8 +57,15 @@ fn generate_executable(context: &CompilerContext, ast: &crate::parser::ast_build
         Diagnostic::error("LLVM generation failed")
             .with_note(error.to_string())
     })?;
+    
+    // Run optimization
+    let optimization_stage = OptimizationStage::default();
+    let optimized_module = optimization_stage.optimize(&llvm_module).map_err(|error| {
+        Diagnostic::error("Optimization failed")
+            .with_note(error.to_string())
+    })?;
 
-    RuntimeStage::link(&context.options.output_path, &llvm_module).map_err(|error| {
+    RuntimeStage::link(&context.options.output_path, &optimized_module).map_err(|error| {
         Diagnostic::error("failed to generate executable").with_note(error.to_string())
     })?;
 
