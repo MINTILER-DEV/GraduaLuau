@@ -41,6 +41,10 @@ path = "../tests/parser/snapshot_tests.rs"
 name = "parser_luau_compatibility"
 path = "../tests/parser/luau_compatibility.rs"
 
+[[test]]
+name = "hir"
+path = "../tests/hir/mod.rs"
+
 [dependencies]
 
 [dev-dependencies]

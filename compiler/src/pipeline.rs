@@ -2,8 +2,12 @@ use std::path::Path;
 
 use crate::context::CompilerContext;
 use crate::diagnostics::Diagnostic;
+use crate::hir::HirStage;
+use crate::llvm::LlvmStage;
 use crate::lexer::{Lexer, TokenKind};
+use crate::mir::MirStage;
 use crate::parser::Parser;
+use crate::runtime::RuntimeStage;
 use crate::semantic;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,7 +18,8 @@ pub enum PipelineKind {
 }
 
 pub fn build(context: &mut CompilerContext, source_path: &Path) -> PipelineResult {
-    prepare_source(context, source_path)?;
+    let (_file_id, ast) = prepare_source(context, source_path)?;
+    generate_executable(context, &ast)?;
 
     Ok(PipelineOutput {
         kind: PipelineKind::Build,
@@ -22,7 +27,8 @@ pub fn build(context: &mut CompilerContext, source_path: &Path) -> PipelineResul
 }
 
 pub fn run(context: &mut CompilerContext, source_path: &Path) -> PipelineResult {
-    prepare_source(context, source_path)?;
+    let (_file_id, ast) = prepare_source(context, source_path)?;
+    generate_executable(context, &ast)?;
 
     Ok(PipelineOutput {
         kind: PipelineKind::Run,
@@ -30,14 +36,29 @@ pub fn run(context: &mut CompilerContext, source_path: &Path) -> PipelineResult 
 }
 
 pub fn check(context: &mut CompilerContext, source_path: &Path) -> PipelineResult {
-    prepare_source(context, source_path)?;
+    let _ = prepare_source(context, source_path)?;
 
     Ok(PipelineOutput {
         kind: PipelineKind::Check,
     })
 }
 
-fn prepare_source(context: &mut CompilerContext, source_path: &Path) -> PipelineResult {
+fn generate_executable(context: &CompilerContext, ast: &crate::parser::ast_builder::AstNode) -> Result<(), Diagnostic> {
+    let hir = HirStage::lower(ast).map_err(|error| {
+        Diagnostic::error("HIR lowering failed")
+            .with_note(error.to_string())
+    })?;
+    let mir = MirStage::lower(&hir);
+    let llvm_module = LlvmStage::generate(&mir);
+
+    RuntimeStage::link(&context.options.output_path, &llvm_module).map_err(|error| {
+        Diagnostic::error("failed to generate executable").with_note(error.to_string())
+    })?;
+
+    Ok(())
+}
+
+fn prepare_source(context: &mut CompilerContext, source_path: &Path) -> Result<(crate::source::FileId, crate::parser::ast_builder::AstNode), Diagnostic> {
     let file_id = context.sources.load_file(source_path).map_err(|error| {
         Diagnostic::error(format!("could not load '{}'", source_path.display()))
             .with_note(error.to_string())
@@ -82,9 +103,7 @@ fn prepare_source(context: &mut CompilerContext, source_path: &Path) -> Pipeline
         return Err(diagnostic);
     }
 
-    Ok(PipelineOutput {
-        kind: PipelineKind::Check,
-    })
+    Ok((file_id, ast))
 }
 
 pub type PipelineResult = Result<PipelineOutput, Diagnostic>;
