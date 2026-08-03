@@ -1,12 +1,18 @@
-print "=== GraduaLuau Demo ==="
+print "=== GraduaLuau Demo ===\n"
+
+local score = 95
+local doubled = score + score
 
 function greet()
-    print "Hello, GraduaLuau!"
+    print "Hello, GraduaLuau!\n"
 end
 
-function square()
-    print "Square demo"
+function square(x: number): number
+    return x * x
 end
 
 greet()
-square()
+local squared = square(13)
+print "Square demo\n"
+print `{squared}\n"
+print score

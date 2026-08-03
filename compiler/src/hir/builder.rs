@@ -1,5 +1,6 @@
 use crate::parser::ast_builder::AstNode;
 use crate::source::SourceSpan;
+use std::collections::HashMap;
 use super::error::HirError;
 use super::module::HirModule;
 use super::statement::{HirStatement, HirStatementKind, HirLocalVariable};
@@ -11,6 +12,7 @@ use super::types::{HirType, HirUnaryOperator, HirBinaryOperator, HirBuiltinFunct
 pub struct HirBuilder {
     function_counter: usize,
     variable_counter: usize,
+    scopes: Vec<HashMap<String, HirVariableId>>,
 }
 
 impl HirBuilder {
@@ -18,6 +20,7 @@ impl HirBuilder {
         Self {
             function_counter: 0,
             variable_counter: 0,
+            scopes: vec![HashMap::new()],
         }
     }
     
@@ -26,6 +29,21 @@ impl HirBuilder {
             AstNode::Program(program) => self.lower_program(program),
             _ => Err(HirError::InvalidInput("Expected program node".to_string())),
         }
+    }
+
+    fn current_scope_mut(&mut self) -> &mut HashMap<String, HirVariableId> {
+        self.scopes.last_mut().expect("HIR builder must always have a scope")
+    }
+
+    fn declare_local(&mut self, name: String, id: HirVariableId) {
+        self.current_scope_mut().insert(name, id);
+    }
+
+    fn resolve_local(&self, name: &str) -> Option<HirVariableId> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
     }
     
     fn lower_program(&mut self, program: &crate::parser::ast_builder::Program) -> Result<HirModule, HirError> {

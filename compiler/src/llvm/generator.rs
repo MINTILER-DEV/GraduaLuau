@@ -5,12 +5,13 @@ use crate::mir::instruction::{MirInstruction, MirInstructionKind};
 use crate::mir::types::{MirValue, MirType};
 use crate::llvm::error::LlvmError;
 use crate::llvm::types::{LlvmType, map_mir_type};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 pub struct LlvmGenerator {
     module_name: String,
     string_constants: Vec<StringConstant>,
     string_constant_names: HashMap<String, String>,
+    function_return_types: HashMap<String, LlvmType>,
 }
 
 struct StringConstant {
@@ -24,12 +25,24 @@ impl LlvmGenerator {
             module_name,
             string_constants: Vec::new(),
             string_constant_names: HashMap::new(),
+            function_return_types: HashMap::new(),
         }
     }
     
     pub fn generate(&mut self, mir: &MirModule) -> Result<String, LlvmError> {
         let mut ir = String::new();
         let mut functions_ir = String::new();
+
+        self.function_return_types = mir
+            .functions
+            .iter()
+            .map(|function| {
+                (
+                    function.name.clone(),
+                    map_mir_type(function.return_type.as_ref().unwrap_or(&MirType::Void)),
+                )
+            })
+            .collect();
         
         // Module header
         ir.push_str(&format!("; Module ID: '{}'\n", self.module_name));
@@ -77,7 +90,8 @@ impl LlvmGenerator {
     }
     
     fn generate_function(&mut self, function: &MirFunction, ir: &mut String) -> Result<(), LlvmError> {
-        let return_type = map_mir_type(function.return_type.as_ref().unwrap_or(&MirType::Void));
+        let return_type = self.function_return_type(function);
+        let local_slots = self.collect_local_slots(function);
         
         // Function signature
         ir.push_str(&format!("define {} @{}(", return_type.to_string(), function.name));
@@ -92,7 +106,7 @@ impl LlvmGenerator {
         
         // Generate basic blocks
         for block in &function.blocks {
-            self.generate_block(block, ir)?;
+            self.generate_block(block, &local_slots, ir)?;
         }
         
         ir.push_str("}\n\n");
@@ -100,7 +114,7 @@ impl LlvmGenerator {
         Ok(())
     }
     
-    fn generate_block(&mut self, block: &MirBasicBlock, ir: &mut String) -> Result<(), LlvmError> {
+    fn generate_block(&mut self, block: &MirBasicBlock, local_slots: &BTreeSet<String>, ir: &mut String) -> Result<(), LlvmError> {
         let block_label = if block.is_entry {
             "entry".to_string()
         } else {
@@ -108,6 +122,12 @@ impl LlvmGenerator {
         };
         
         ir.push_str(&format!("{}:\n", block_label));
+
+        if block.is_entry {
+            for slot in local_slots {
+                ir.push_str(&format!("    %{} = alloca i64, align 8\n", slot));
+            }
+        }
         
         for instruction in &block.instructions {
             self.generate_instruction(instruction, ir)?;
@@ -133,10 +153,28 @@ impl LlvmGenerator {
                             global_name
                         ));
                     }
-                    _ => {
-                        let value_str = self.mir_value_to_llvm(value);
-                        let llvm_type = self.mir_value_type(value);
-                        ir.push_str(&format!("%{} = {} {}\n", result.0, llvm_type.to_string(), value_str));
+                    MirValue::Integer(integer_value) => {
+                        ir.push_str(&format!("%{} = add i64 0, {}\n", result.0, integer_value));
+                    }
+                    MirValue::Float(float_value) => {
+                        ir.push_str(&format!(
+                            "%{} = fadd double 0.0, {}\n",
+                            result.0,
+                            self.mir_value_to_llvm(value)
+                        ));
+                    }
+                    MirValue::Boolean(boolean_value) => {
+                        ir.push_str(&format!(
+                            "%{} = xor i1 false, {}\n",
+                            result.0,
+                            if *boolean_value { "true" } else { "false" }
+                        ));
+                    }
+                    MirValue::Nil => {
+                        ir.push_str(&format!("%{} = inttoptr i64 0 to i8*\n", result.0));
+                    }
+                    MirValue::Unit => {
+                        ir.push_str(&format!("%{} = add i64 0, 0\n", result.0));
                     }
                 }
             }
@@ -198,11 +236,19 @@ impl LlvmGenerator {
             }
             
             MirInstructionKind::Load { result, name } => {
-                ir.push_str(&format!("%{} = load i64, i64* @{}\n", result.0, name));
+                ir.push_str(&format!(
+                    "%{} = load i64, i64* {}\n",
+                    result.0,
+                    self.format_pointer_name(name)
+                ));
             }
             
             MirInstructionKind::Store { name, value } => {
-                ir.push_str(&format!("store i64 %{}, i64* @{}\n", value.0, name));
+                ir.push_str(&format!(
+                    "store i64 %{}, i64* {}\n",
+                    value.0,
+                    self.format_pointer_name(name)
+                ));
             }
             
             MirInstructionKind::Branch { condition, true_block, false_block } => {
@@ -218,10 +264,22 @@ impl LlvmGenerator {
             
             MirInstructionKind::Call { result, function, arguments } => {
                 let args: Vec<String> = arguments.iter().map(|a| format!("i8* %{}", a.0)).collect();
+                let call_return_type = self.call_return_type(function);
                 if let Some(r) = result {
-                    ir.push_str(&format!("%{} = call i8* @{}({})\n", r.0, function, args.join(", ")));
+                    ir.push_str(&format!(
+                        "%{} = call {} @{}({})\n",
+                        r.0,
+                        call_return_type.to_string(),
+                        function,
+                        args.join(", ")
+                    ));
                 } else {
-                    ir.push_str(&format!("call void @{}({})\n", function, args.join(", ")));
+                    ir.push_str(&format!(
+                        "call {} @{}({})\n",
+                        call_return_type.to_string(),
+                        function,
+                        args.join(", ")
+                    ));
                 }
             }
             
@@ -263,11 +321,67 @@ impl LlvmGenerator {
         self.string_constants.push(StringConstant { name: name.clone(), value });
         name
     }
+
+    fn function_return_type(&self, function: &MirFunction) -> LlvmType {
+        self.function_return_types
+            .get(&function.name)
+            .cloned()
+            .unwrap_or(LlvmType::Void)
+    }
+
+    fn call_return_type(&self, function_name: &str) -> LlvmType {
+        match function_name {
+            "glua_print" | "glua_table_set" => LlvmType::Void,
+            "glua_table_new" | "glua_table_get" => LlvmType::Pointer(Box::new(LlvmType::Integer(8))),
+            other => self
+                .function_return_types
+                .get(other)
+                .cloned()
+                .unwrap_or(LlvmType::Void),
+        }
+    }
+
+    fn collect_local_slots(&self, function: &MirFunction) -> BTreeSet<String> {
+        let mut slots = BTreeSet::new();
+
+        for block in &function.blocks {
+            for instruction in &block.instructions {
+                match &instruction.kind {
+                    MirInstructionKind::Load { name, .. } | MirInstructionKind::Store { name, .. } => {
+                        if self.is_local_slot(name) {
+                            slots.insert(name.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        slots
+    }
+
+    fn is_local_slot(&self, name: &str) -> bool {
+        name.starts_with("local_")
+    }
+
+    fn format_pointer_name(&self, name: &str) -> String {
+        if self.is_local_slot(name) {
+            format!("%{}", name)
+        } else {
+            format!("@{}", name)
+        }
+    }
     
     fn mir_value_to_llvm(&self, value: &MirValue) -> String {
         match value {
             MirValue::Integer(n) => n.to_string(),
-            MirValue::Float(f) => f.to_string(),
+            MirValue::Float(f) => {
+                let mut text = f.to_string();
+                if !text.contains('.') && !text.contains('e') && !text.contains('E') {
+                    text.push_str(".0");
+                }
+                text
+            }
             MirValue::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
             MirValue::String(s) => format!("c\"{}\\00\"", s),
             MirValue::Nil => "null".to_string(),

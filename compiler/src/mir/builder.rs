@@ -1,4 +1,4 @@
-use crate::hir::{HirModule, HirFunction, HirStatement, HirExpression, HirExpressionKind, HirStatementKind};
+use crate::hir::{HirModule, HirFunction, HirStatement, HirExpression, HirExpressionKind, HirStatementKind, HirType, HirVariableId};
 use crate::mir::error::MirError;
 use crate::mir::module::MirModule;
 use crate::mir::function::MirFunction;
@@ -37,6 +37,7 @@ impl MirBuilder {
         self.function_counter += 1;
         
         let mut mir_function = MirFunction::new(function_id, hir_function.name.clone());
+        mir_function.return_type = self.infer_function_return_type(hir_function);
         
         // Create entry block
         let entry_block_id = MirBlockId::new(self.block_counter);
@@ -71,7 +72,7 @@ impl MirBuilder {
                     let init_value_id = self.lower_expression(init, mir_function, block_index)?;
                     let store_instr = MirInstruction {
                         kind: MirInstructionKind::Store {
-                            name: variable.name.clone(),
+                            name: self.local_slot_name(variable.id),
                             value: init_value_id,
                         },
                         result_type: None,
@@ -83,10 +84,10 @@ impl MirBuilder {
             HirStatementKind::Assignment { targets, values } => {
                 for (target, value) in targets.iter().zip(values.iter()) {
                     let value_id = self.lower_expression(value, mir_function, block_index)?;
-                    if let HirExpressionKind::GlobalVariable(name) = &target.kind {
+                    if let Some(name) = self.assignment_target_name(target) {
                         let store_instr = MirInstruction {
                             kind: MirInstructionKind::Store {
-                                name: name.clone(),
+                                name,
                                 value: value_id,
                             },
                             result_type: None,
@@ -302,12 +303,17 @@ impl MirBuilder {
             }
             
             HirExpressionKind::Number(n) => {
+                let (mir_value, result_type) = if n.fract() == 0.0 {
+                    (MirValue::Integer(*n as i64), MirType::Integer)
+                } else {
+                    (MirValue::Float(*n), MirType::Float)
+                };
                 MirInstruction {
                     kind: MirInstructionKind::Const {
                         result: result_id,
-                        value: MirValue::Float(*n),
+                        value: mir_value,
                     },
-                    result_type: Some(MirType::Float),
+                    result_type: Some(result_type),
                 }
             }
             
@@ -325,7 +331,7 @@ impl MirBuilder {
                 MirInstruction {
                     kind: MirInstructionKind::Load {
                         result: result_id,
-                        name: format!("local_{}", id.0),
+                        name: self.local_slot_name(*id),
                     },
                     result_type: Some(MirType::Any),
                 }
@@ -481,5 +487,47 @@ impl MirBuilder {
         
         mir_function.add_instruction(block_index, instruction);
         Ok(result_id)
+    }
+
+    fn local_slot_name(&self, id: HirVariableId) -> String {
+        format!("local_{}", id.0)
+    }
+
+    fn assignment_target_name(&self, target: &HirExpression) -> Option<String> {
+        match &target.kind {
+            HirExpressionKind::LocalVariable(id) => Some(self.local_slot_name(*id)),
+            HirExpressionKind::GlobalVariable(name) => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    fn infer_function_return_type(&self, hir_function: &HirFunction) -> Option<MirType> {
+        if let Some(return_type) = hir_function.return_type.as_ref() {
+            return Some(self.lower_hir_type(return_type));
+        }
+
+        if hir_function.body.iter().any(|statement| {
+            matches!(
+                &statement.kind,
+                HirStatementKind::Return(Some(values)) if !values.is_empty()
+            )
+        }) {
+            return Some(MirType::Integer);
+        }
+
+        None
+    }
+
+    fn lower_hir_type(&self, hir_type: &HirType) -> MirType {
+        match hir_type {
+            HirType::Nil => MirType::Any,
+            HirType::Boolean => MirType::Boolean,
+            HirType::Number => MirType::Integer,
+            HirType::String => MirType::String,
+            HirType::Table => MirType::Table,
+            HirType::Function => MirType::Function,
+            HirType::Any => MirType::Any,
+            HirType::Unknown => MirType::Unknown,
+        }
     }
 }
