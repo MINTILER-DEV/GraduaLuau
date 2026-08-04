@@ -123,7 +123,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_statement(&mut self) -> Statement {
+    pub fn parse_statement(&mut self) -> Statement {
         // Check for cascading error suppression
         if self.recovery.should_suppress_cascading() {
             let span = self.current().map(|tok| tok.span).unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
@@ -640,6 +640,9 @@ impl<'a> Parser<'a> {
                     unreachable!()
                 }
             }
+            Some(TokenKind::InterpolatedStringStart) => {
+                self.parse_segmented_interpolated_string()
+            }
             Some(TokenKind::LeftBrace) => {
                 self.parse_table_constructor()
             }
@@ -707,7 +710,7 @@ impl<'a> Parser<'a> {
                 Some(TokenKind::LeftParen) => {
                     expression = self.parse_call_expression(expression);
                 }
-                Some(TokenKind::StringLiteral(_)) | Some(TokenKind::LeftBrace) | Some(TokenKind::InterpolatedString(_)) => {
+                Some(TokenKind::StringLiteral(_)) | Some(TokenKind::LeftBrace) | Some(TokenKind::InterpolatedString(_)) | Some(TokenKind::InterpolatedStringStart) => {
                     expression = self.parse_shorthand_call(expression);
                 }
                 Some(TokenKind::Colon) => {
@@ -766,7 +769,7 @@ impl<'a> Parser<'a> {
 
         // Parse the shorthand argument (string literal, table constructor, or interpolated string)
         match self.current().map(|tok| &tok.kind) {
-            Some(TokenKind::StringLiteral(_)) | Some(TokenKind::InterpolatedString(_)) => {
+            Some(TokenKind::StringLiteral(_)) | Some(TokenKind::InterpolatedString(_)) | Some(TokenKind::InterpolatedStringStart) => {
                 let arg = self.parse_prefix_expression();
                 arguments.push(arg);
             }
@@ -822,7 +825,7 @@ impl<'a> Parser<'a> {
         } else {
             // Shorthand argument (string literal, interpolated string, or table constructor)
             match self.current().map(|tok| &tok.kind) {
-                Some(TokenKind::StringLiteral(_)) | Some(TokenKind::InterpolatedString(_)) => {
+                Some(TokenKind::StringLiteral(_)) | Some(TokenKind::InterpolatedString(_)) | Some(TokenKind::InterpolatedStringStart) => {
                     let arg = self.parse_prefix_expression();
                     arguments.push(arg);
                 }
@@ -1034,6 +1037,56 @@ impl<'a> Parser<'a> {
         }
 
         parts
+    }
+
+    fn parse_segmented_interpolated_string(&mut self) -> Expression {
+        let start_span = self.current()
+            .map(|token| token.span)
+            .unwrap_or(SourceSpan::new(FileId::new(0), 0, 0));
+        self.advance();
+
+        let mut parts = Vec::new();
+        let mut end = start_span.end();
+
+        while let Some(token) = self.current().cloned() {
+            end = token.span.end();
+            match token.kind {
+                TokenKind::StringText(text) => {
+                    parts.push(InterpolatedStringPart::Text(text));
+                    self.advance();
+                }
+                TokenKind::InterpolationStart => {
+                    self.advance();
+                    let expression = self.parse_expression();
+                    parts.push(InterpolatedStringPart::Expression(expression));
+
+                    if matches!(self.current().map(|token| &token.kind), Some(TokenKind::InterpolationEnd)) {
+                        end = self.current().map(|token| token.span.end()).unwrap_or(end);
+                        self.advance();
+                    } else {
+                        let span = self.current().map(|token| token.span).unwrap_or(token.span);
+                        self.emit_error("Expected '}' after interpolated expression", span);
+                    }
+                }
+                TokenKind::InterpolatedStringEnd => {
+                    self.advance();
+                    break;
+                }
+                TokenKind::EOF => {
+                    self.emit_error("Unterminated interpolated string", token.span);
+                    break;
+                }
+                _ => {
+                    self.emit_error("Expected interpolated string part", token.span);
+                    self.advance();
+                }
+            }
+        }
+
+        Expression {
+            kind: ExpressionKind::InterpolatedString(parts),
+            span: SourceSpan::new(start_span.file_id(), start_span.start(), end),
+        }
     }
 }
 #[cfg(test)]

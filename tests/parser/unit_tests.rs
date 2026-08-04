@@ -7,7 +7,7 @@ mod tests {
     use compiler::lexer::TokenKind;
     use compiler::parser::Parser;
     use compiler::source::SourceManager;
-    use compiler::parser::ast_builder::{AstNode, ExpressionKind, StatementKind, TableField};
+    use compiler::parser::ast_builder::{ExpressionKind, StatementKind, TableField};
 
     fn parse_expression(code: &str) -> compiler::parser::ast_builder::Expression {
         let mut sources = SourceManager::new();

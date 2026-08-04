@@ -79,8 +79,8 @@ end
 #[test]
 fn test_arithmetic() {
     let source = r#"
-function calculate()
-    local x = 5 + 10
+function calculate(seed: number): number
+    local x = seed + 10
     local y = x * 2
     return y
 end

@@ -57,9 +57,14 @@ mod tests {
             }
             StatementKind::Break => "BreakStatement".to_string(),
             StatementKind::Continue => "ContinueStatement".to_string(),
-            StatementKind::Local { names, .. } => {
+            StatementKind::Local { names, initializers } => {
                 let name_list: Vec<String> = names.iter().map(|(name, _)| name.clone()).collect();
-                format!("LocalStatement({})", name_list.join(", "))
+                if initializers.is_empty() {
+                    format!("LocalStatement({})", name_list.join(", "))
+                } else {
+                    let initializer_list: Vec<String> = initializers.iter().map(expression_to_string).collect();
+                    format!("LocalStatement({}) init=[{}]", name_list.join(", "), initializer_list.join(", "))
+                }
             }
             StatementKind::Assignment { targets, .. } => {
                 let target_list: Vec<String> = targets.iter().map(expression_to_string).collect();
@@ -123,7 +128,7 @@ print(x)"#;
         let ast = parse_program(code);
         let output = ast_to_string(&ast);
         
-        let expected = "Program\n  LocalStatement(x)\n  ExpressionStatement(Call(Identifier(print), [Identifier(x)]))\n";
+        let expected = "Program\n  LocalStatement(x) init=[NumberLiteral(5)]\n  ExpressionStatement(Call(Identifier(print), [Identifier(x)]))\n";
         assert_eq!(output, expected, "Snapshot mismatch!\nExpected:\n{}\nGot:\n{}", expected, output);
     }
 
