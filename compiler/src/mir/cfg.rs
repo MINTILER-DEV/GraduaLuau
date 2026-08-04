@@ -306,21 +306,22 @@ impl MirControlFlowGraph {
                 continue;
             }
 
-            let strict_dominators: Vec<_> = block_dominators
+            let mut strict_dominators: Vec<_> = block_dominators
                 .iter()
                 .copied()
                 .filter(|dominator| *dominator != block_id)
                 .collect();
+            strict_dominators.sort_by_key(|block_id| block_id.0);
 
             for candidate in &strict_dominators {
-                let dominated_by_other = strict_dominators.iter().any(|other| {
+                let candidate_dominates_other = strict_dominators.iter().any(|other| {
                     other != candidate
                         && dominators
-                            .get(candidate)
-                            .is_some_and(|candidate_doms| candidate_doms.contains(other))
+                            .get(other)
+                            .is_some_and(|other_dominators| other_dominators.contains(candidate))
                 });
 
-                if !dominated_by_other {
+                if !candidate_dominates_other {
                     immediate.insert(block_id, *candidate);
                     break;
                 }
@@ -328,6 +329,42 @@ impl MirControlFlowGraph {
         }
 
         immediate
+    }
+
+    pub fn dominance_frontiers(&self) -> HashMap<MirBlockId, HashSet<MirBlockId>> {
+        let immediate_dominators = self.immediate_dominators();
+        let mut frontiers: HashMap<_, _> = self
+            .nodes
+            .keys()
+            .copied()
+            .map(|block_id| (block_id, HashSet::new()))
+            .collect();
+
+        for (&block_id, node) in &self.nodes {
+            if node.predecessors.len() < 2 {
+                continue;
+            }
+
+            let Some(stop_at) = immediate_dominators.get(&block_id).copied() else {
+                continue;
+            };
+
+            for predecessor in &node.predecessors {
+                let mut runner = *predecessor;
+                while runner != stop_at {
+                    if let Some(frontier) = frontiers.get_mut(&runner) {
+                        frontier.insert(block_id);
+                    }
+
+                    let Some(next_runner) = immediate_dominators.get(&runner).copied() else {
+                        break;
+                    };
+                    runner = next_runner;
+                }
+            }
+        }
+
+        frontiers
     }
 
     pub fn to_dot(&self, function_name: &str) -> String {

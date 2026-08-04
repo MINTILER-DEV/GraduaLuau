@@ -1,7 +1,9 @@
-use compiler::hir::function::HirFunctionMetadata;
+use compiler::hir::function::{HirFunctionMetadata, HirParameter};
+use compiler::hir::statement::HirLocalVariable;
 use compiler::hir::{
-    HirExpression, HirExpressionKind, HirFunction, HirFunctionId, HirFunctionSignature, HirScopeId,
-    HirStage, HirStatement, HirStatementKind, HirSymbolId, HirType,
+    HirBinaryOperator, HirExpression, HirExpressionKind, HirFunction, HirFunctionId,
+    HirFunctionSignature, HirScopeId, HirStage, HirStatement, HirStatementKind, HirSymbolId,
+    HirType, HirVariableId,
 };
 use compiler::lexer::Lexer;
 use compiler::mir::{
@@ -315,10 +317,12 @@ end
     let square = &mir.functions[0];
 
     assert_eq!(square.parameter_data.len(), 1);
-    assert!(square
-        .locals
-        .iter()
-        .any(|local| local.storage == square.parameter_data[0].storage));
+    assert!(
+        square
+            .locals
+            .iter()
+            .any(|local| local.storage == square.parameter_data[0].storage)
+    );
     assert!(matches!(
         square.values[0].kind,
         MirValueKind::Parameter { .. }
@@ -352,10 +356,12 @@ end
     for function in &mir.functions {
         for block in &function.blocks {
             assert!(block.terminator.is_some());
-            assert!(block
-                .instructions
-                .last()
-                .is_some_and(|instruction| instruction.is_terminator()));
+            assert!(
+                block
+                    .instructions
+                    .last()
+                    .is_some_and(|instruction| instruction.is_terminator())
+            );
             assert_eq!(
                 block
                     .instructions
@@ -432,10 +438,12 @@ end
         .filter(|instruction| matches!(instruction.kind, MirInstructionKind::TableSet { .. }))
         .count();
 
-    assert!(function.blocks[0]
-        .instructions
-        .iter()
-        .any(|instruction| matches!(instruction.kind, MirInstructionKind::TableNew { .. })));
+    assert!(
+        function.blocks[0]
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.kind, MirInstructionKind::TableNew { .. }))
+    );
     assert_eq!(table_sets, 3);
 }
 
@@ -554,11 +562,13 @@ fn multiple_returns_share_one_exit_block() {
         Some(MirTerminator::Return { .. })
     ));
     assert_eq!(function.blocks[3].predecessors.len(), 2);
-    assert!(function
-        .blocks
-        .iter()
-        .take(3)
-        .all(|block| { !matches!(block.terminator, Some(MirTerminator::Return { .. })) }));
+    assert!(
+        function
+            .blocks
+            .iter()
+            .take(3)
+            .all(|block| { !matches!(block.terminator, Some(MirTerminator::Return { .. })) })
+    );
 }
 
 #[test]
@@ -608,10 +618,18 @@ fn cfg_detects_natural_while_loop() {
     let cfg = mir.functions[0].cfg.as_ref().expect("CFG should be built");
 
     assert_eq!(cfg.loops.len(), 1);
-    assert!(cfg.loops[0]
-        .body_blocks
-        .contains(&function_block_id(&mir.functions[0], 1)));
+    assert!(
+        cfg.loops[0]
+            .body_blocks
+            .contains(&function_block_id(&mir.functions[0], 1))
+    );
     assert!(!cfg.loops[0].exit_edges.is_empty());
+
+    let immediate_dominators = cfg.immediate_dominators();
+    assert_eq!(
+        immediate_dominators.get(&function_block_id(&mir.functions[0], 2)),
+        Some(&function_block_id(&mir.functions[0], 1))
+    );
 }
 
 #[test]
@@ -637,6 +655,180 @@ fn validator_rejects_cfg_block_edge_mismatches() {
     assert!(validator.validate(&mir).is_err());
 }
 
+#[test]
+fn ssa_metadata_collects_defs_uses_and_phi_candidates() {
+    let span = test_span();
+    let flag = HirParameter {
+        id: HirVariableId::new(0),
+        symbol_id: HirSymbolId::new(0),
+        name: "flag".to_string(),
+        param_type: Some(HirType::Boolean),
+        scope_id: HirScopeId::new(0),
+        span,
+    };
+    let score = local_variable(1, 1, "score", HirType::Number, span);
+    let module = manual_module_with_signature(
+        "choose",
+        vec![flag],
+        vec![score.clone()],
+        vec![
+            local_stmt(score.clone(), Some(number_expr(0.0, span)), span),
+            HirStatement {
+                kind: HirStatementKind::If {
+                    condition: local_expr(0, 0, HirType::Boolean, span),
+                    then_block: vec![assign_local_stmt(
+                        1,
+                        1,
+                        number_expr(5.0, span),
+                        HirType::Number,
+                        span,
+                    )],
+                    else_block: Some(vec![assign_local_stmt(
+                        1,
+                        1,
+                        number_expr(10.0, span),
+                        HirType::Number,
+                        span,
+                    )]),
+                },
+                span,
+            },
+            return_stmt(local_expr(1, 1, HirType::Number, span), span),
+        ],
+        HirType::Number,
+    );
+
+    let mir = MirStage::lower(&module).expect("branching HIR should lower to MIR");
+    let function = &mir.functions[0];
+    let ssa = function
+        .metadata
+        .ssa
+        .as_ref()
+        .expect("SSA preparation metadata should be generated");
+    let cfg = function.cfg.as_ref().expect("CFG should be generated");
+    let reachable_blocks = cfg.reachable_blocks();
+
+    assert!(
+        ssa.dominators
+            .values()
+            .all(|dominators| dominators.contains(&cfg.entry))
+    );
+    assert!(
+        ssa.dominance_frontiers
+            .values()
+            .any(|frontier| !frontier.is_empty())
+    );
+    assert!(
+        ssa.definitions
+            .values()
+            .any(|definitions| definitions.len() >= 3)
+    );
+
+    let phi_candidate = ssa
+        .phi_candidates
+        .values()
+        .flatten()
+        .find(|candidate| reachable_blocks.contains(&candidate.block))
+        .expect("score should need a phi candidate at the merge block");
+    assert!(
+        cfg.nodes
+            .get(&phi_candidate.block)
+            .is_some_and(|node| node.predecessors.len() >= 2)
+    );
+}
+
+#[test]
+fn lifetime_metadata_tracks_live_sets_dead_variables_and_temporaries() {
+    let span = test_span();
+    let flag = HirParameter {
+        id: HirVariableId::new(0),
+        symbol_id: HirSymbolId::new(0),
+        name: "flag".to_string(),
+        param_type: Some(HirType::Boolean),
+        scope_id: HirScopeId::new(0),
+        span,
+    };
+    let used = local_variable(1, 1, "used", HirType::Number, span);
+    let dead = local_variable(2, 2, "dead", HirType::Number, span);
+    let module = manual_module_with_signature(
+        "lifetimes",
+        vec![flag],
+        vec![used.clone(), dead.clone()],
+        vec![
+            local_stmt(used.clone(), Some(number_expr(1.0, span)), span),
+            local_stmt(dead, Some(number_expr(2.0, span)), span),
+            HirStatement {
+                kind: HirStatementKind::If {
+                    condition: local_expr(0, 0, HirType::Boolean, span),
+                    then_block: vec![assign_local_stmt(
+                        1,
+                        1,
+                        add_expr(
+                            local_expr(1, 1, HirType::Number, span),
+                            number_expr(1.0, span),
+                            span,
+                        ),
+                        HirType::Number,
+                        span,
+                    )],
+                    else_block: Some(vec![assign_local_stmt(
+                        1,
+                        1,
+                        add_expr(
+                            local_expr(1, 1, HirType::Number, span),
+                            number_expr(2.0, span),
+                            span,
+                        ),
+                        HirType::Number,
+                        span,
+                    )]),
+                },
+                span,
+            },
+            return_stmt(local_expr(1, 1, HirType::Number, span), span),
+        ],
+        HirType::Number,
+    );
+
+    let mir = MirStage::lower(&module).expect("lifetime HIR should lower to MIR");
+    let function = &mir.functions[0];
+    let ssa = function
+        .metadata
+        .ssa
+        .as_ref()
+        .expect("SSA metadata should be generated");
+    let lifetimes = function
+        .metadata
+        .lifetimes
+        .as_ref()
+        .expect("lifetime metadata should be generated");
+
+    let dead_local = lifetimes.dead_variables.iter().find(|storage| {
+        ssa.variables.get(*storage).is_some_and(|variable| {
+            variable.symbol_id.is_some() && ssa.uses.get(*storage).is_none()
+        })
+    });
+    assert!(dead_local.is_some());
+    assert!(
+        lifetimes
+            .live_out
+            .values()
+            .any(|live_out| !live_out.is_empty())
+    );
+    assert!(
+        lifetimes
+            .value_lifetimes
+            .values()
+            .any(|lifetime| lifetime.last_use.is_some())
+    );
+    assert!(
+        lifetimes
+            .variable_lifetimes
+            .values()
+            .all(|lifetime| lifetime.definition.is_some())
+    );
+}
+
 fn test_span() -> SourceSpan {
     SourceSpan::new(FileId::new(0), 0, 1)
 }
@@ -653,6 +845,96 @@ fn bool_expr(value: bool, span: SourceSpan) -> HirExpression {
 fn return_bool_stmt(value: bool, span: SourceSpan) -> HirStatement {
     HirStatement {
         kind: HirStatementKind::Return(Some(vec![bool_expr(value, span)])),
+        span,
+    }
+}
+
+fn local_variable(
+    variable_id: usize,
+    symbol_id: usize,
+    name: &str,
+    var_type: HirType,
+    span: SourceSpan,
+) -> HirLocalVariable {
+    HirLocalVariable {
+        id: HirVariableId::new(variable_id),
+        symbol_id: HirSymbolId::new(symbol_id),
+        name: name.to_string(),
+        var_type: Some(var_type),
+        scope_id: HirScopeId::new(0),
+        span,
+    }
+}
+
+fn local_stmt(
+    variable: HirLocalVariable,
+    initializer: Option<HirExpression>,
+    span: SourceSpan,
+) -> HirStatement {
+    HirStatement {
+        kind: HirStatementKind::LocalVariable {
+            variable,
+            initializer,
+        },
+        span,
+    }
+}
+
+fn assign_local_stmt(
+    variable_id: usize,
+    symbol_id: usize,
+    value: HirExpression,
+    var_type: HirType,
+    span: SourceSpan,
+) -> HirStatement {
+    HirStatement {
+        kind: HirStatementKind::Assignment {
+            targets: vec![local_expr(variable_id, symbol_id, var_type, span)],
+            values: vec![value],
+        },
+        span,
+    }
+}
+
+fn return_stmt(expression: HirExpression, span: SourceSpan) -> HirStatement {
+    HirStatement {
+        kind: HirStatementKind::Return(Some(vec![expression])),
+        span,
+    }
+}
+
+fn local_expr(
+    variable_id: usize,
+    symbol_id: usize,
+    expr_type: HirType,
+    span: SourceSpan,
+) -> HirExpression {
+    HirExpression {
+        kind: HirExpressionKind::LocalVariable(HirVariableId::new(variable_id)),
+        expr_type: Some(expr_type),
+        symbol_id: Some(HirSymbolId::new(symbol_id)),
+        span,
+    }
+}
+
+fn number_expr(value: f64, span: SourceSpan) -> HirExpression {
+    HirExpression {
+        kind: HirExpressionKind::Number(value),
+        expr_type: Some(HirType::Number),
+        symbol_id: None,
+        span,
+    }
+}
+
+fn add_expr(left: HirExpression, right: HirExpression, span: SourceSpan) -> HirExpression {
+    HirExpression {
+        kind: HirExpressionKind::Binary {
+            left: Box::new(left),
+            operator: HirBinaryOperator::Add,
+            right: Box::new(right),
+        },
+        expr_type: Some(HirType::Number),
+        symbol_id: None,
         span,
     }
 }
@@ -687,6 +969,39 @@ fn manual_module(
         scope_id: HirScopeId::new(0),
         is_local: false,
         metadata: HirFunctionMetadata::default(),
+        span,
+    });
+    module
+}
+
+fn manual_module_with_signature(
+    function_name: &str,
+    parameters: Vec<HirParameter>,
+    local_variables: Vec<HirLocalVariable>,
+    body: Vec<HirStatement>,
+    return_type: HirType,
+) -> compiler::hir::HirModule {
+    let span = test_span();
+    let mut module = compiler::hir::HirModule::new("manual".to_string(), span);
+    module.functions.push(HirFunction {
+        id: HirFunctionId::new(0),
+        symbol_id: HirSymbolId::new(0),
+        name: function_name.to_string(),
+        parameters,
+        local_variables,
+        body,
+        return_type: Some(return_type.clone()),
+        signature: HirFunctionSignature {
+            parameter_types: vec![HirType::Boolean],
+            return_type,
+            calling_convention: compiler::hir::HirCallingConvention::GraduaLuau,
+            is_variadic: false,
+        },
+        scope_id: HirScopeId::new(0),
+        is_local: false,
+        metadata: HirFunctionMetadata {
+            has_explicit_return: true,
+        },
         span,
     });
     module

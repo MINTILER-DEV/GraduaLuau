@@ -1,6 +1,8 @@
 use super::block::MirBasicBlock;
 use super::cfg::MirControlFlowGraph;
 use super::instruction::MirInstruction;
+use super::lifetime::MirLifetimeMetadata;
+use super::ssa::MirSsaMetadata;
 use super::types::{MirBlockId, MirFunctionId, MirType};
 use super::value::{MirLocal, MirParameter, MirValueData};
 use crate::source::SourceSpan;
@@ -119,4 +121,6 @@ impl MirFunction {
 pub struct MirFunctionMetadata {
     pub span: Option<SourceSpan>,
     pub has_explicit_return: bool,
+    pub ssa: Option<MirSsaMetadata>,
+    pub lifetimes: Option<MirLifetimeMetadata>,
 }
