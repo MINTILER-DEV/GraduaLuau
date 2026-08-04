@@ -4,26 +4,30 @@
 // for the GraduaLuau compiler. The MIR is a low-level, language-independent
 // representation used for optimization and backend code generation.
 
-pub mod error;
-pub mod types;
-pub mod instruction;
 pub mod block;
-pub mod function;
-pub mod module;
 pub mod builder;
-pub mod validator;
+pub mod error;
+pub mod function;
+pub mod instruction;
+pub mod module;
+pub mod operand;
 pub mod printer;
+pub mod types;
+pub mod validator;
+pub mod value;
 
 // Re-export commonly used types for convenience
-pub use error::{MirError};
-pub use types::{MirValueId, MirBlockId, MirFunctionId, MirType, MirValue};
-pub use instruction::{MirInstruction, MirInstructionKind};
 pub use block::MirBasicBlock;
-pub use function::MirFunction;
-pub use module::MirModule;
 pub use builder::MirBuilder;
-pub use validator::{MirValidator, MirValidationError};
+pub use error::MirError;
+pub use function::MirFunction;
+pub use instruction::{MirInstruction, MirInstructionKind, MirTerminator};
+pub use module::MirModule;
+pub use operand::MirOperand;
 pub use printer::MirPrinter;
+pub use types::{MirBlockId, MirCompareOperator, MirFunctionId, MirType, MirValue, MirValueId};
+pub use validator::{MirValidationError, MirValidator};
+pub use value::{MirConstant, MirGlobal, MirLocal, MirParameter, MirValueData, MirValueKind};
 
 use crate::hir::HirModule;
 
@@ -34,7 +38,7 @@ impl MirStage {
     pub fn lower(hir: &HirModule) -> Result<MirModule, MirError> {
         let mut builder = MirBuilder::new();
         let mir_module = builder.build(hir)?;
-        
+
         // Validate the generated MIR
         let mut validator = MirValidator::new();
         if let Err(validation_errors) = validator.validate(&mir_module) {
@@ -44,7 +48,7 @@ impl MirStage {
                 validation_errors
             )));
         }
-        
+
         Ok(mir_module)
     }
 }

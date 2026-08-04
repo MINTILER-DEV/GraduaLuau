@@ -38,6 +38,16 @@ pub enum MirType {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MirCompareOperator {
+    Equal,
+    NotEqual,
+    LessThan,
+    LessEqual,
+    GreaterThan,
+    GreaterEqual,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum MirValue {
     Integer(i64),

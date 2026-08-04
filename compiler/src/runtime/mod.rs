@@ -254,6 +254,21 @@ void glua_print(char *value) {
     fflush(stdout);
 }
 
+void glua_print_i64(long long value) {
+    printf("%lld", value);
+    fflush(stdout);
+}
+
+void glua_print_f64(double value) {
+    printf("%g", value);
+    fflush(stdout);
+}
+
+void glua_print_bool(_Bool value) {
+    fputs(value ? "true" : "false", stdout);
+    fflush(stdout);
+}
+
 void *glua_table_new(void) {
     return calloc(1, 1);
 }
