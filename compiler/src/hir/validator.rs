@@ -311,8 +311,15 @@ impl HirValidator {
             HirExpressionKind::Nil
             | HirExpressionKind::Boolean(_)
             | HirExpressionKind::Number(_)
-            | HirExpressionKind::String(_)
-            | HirExpressionKind::GlobalVariable(_) => {}
+            | HirExpressionKind::String(_) => {}
+            HirExpressionKind::GlobalVariable(_) => {
+                if expression.symbol_id.is_none() {
+                    self.errors.push(HirValidationError::InvalidExpression {
+                        message: "Global reference is missing a symbol".to_string(),
+                        span: expression.span,
+                    });
+                }
+            }
             HirExpressionKind::LocalVariable(_) => {
                 if expression.symbol_id.is_none() {
                     self.errors.push(HirValidationError::InvalidExpression {

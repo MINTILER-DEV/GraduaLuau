@@ -18,6 +18,7 @@ use super::types::{HirBinaryOperator, HirBuiltinFunction, HirType, HirUnaryOpera
 struct HirBinding {
     symbol_id: HirSymbolId,
     variable_id: Option<HirVariableId>,
+    kind: HirSymbolKind,
     value_type: Option<HirType>,
 }
 
@@ -30,6 +31,7 @@ pub struct HirBuilder {
     bindings: Vec<HashMap<String, HirBinding>>,
     scopes: Vec<HirScope>,
     symbols: Vec<HirSymbol>,
+    errors: Vec<String>,
 }
 
 impl HirBuilder {
@@ -45,6 +47,7 @@ impl HirBuilder {
             bindings: vec![HashMap::new()],
             scopes: vec![HirScope::new(root_scope, None)],
             symbols: Vec::new(),
+            errors: Vec::new(),
         }
     }
 
@@ -61,6 +64,8 @@ impl HirBuilder {
     ) -> Result<HirModule, HirError> {
         let mut module = HirModule::new("main".to_string(), program.span);
         module.metadata.root_scope = Some(self.current_scope_id());
+        self.declare_builtin_symbols(program.span);
+        self.predeclare_module_symbols(&program.statements);
 
         let mut entry_statements = Vec::new();
 
@@ -100,6 +105,10 @@ impl HirBuilder {
 
         module.scopes = self.scopes.clone();
         module.symbols = self.symbols.clone();
+
+        if !self.errors.is_empty() {
+            return Err(HirError::LoweringError(self.errors.join("; ")));
+        }
 
         Ok(module)
     }
@@ -146,6 +155,45 @@ impl HirBuilder {
         Ok(())
     }
 
+    fn declare_builtin_symbols(&mut self, span: SourceSpan) {
+        for name in [
+            "print", "type", "tonumber", "tostring", "error", "pairs", "ipairs", "require",
+        ] {
+            if self.resolve_current_binding(name).is_none() {
+                self.declare_symbol(
+                    name.to_string(),
+                    HirSymbolKind::BuiltinFunction,
+                    Some(HirType::Function),
+                    span,
+                );
+            }
+        }
+    }
+
+    fn predeclare_module_symbols(&mut self, statements: &[crate::parser::ast_builder::Statement]) {
+        for statement in statements {
+            match &statement.kind {
+                crate::parser::ast_builder::StatementKind::Function { name, .. } => {
+                    self.declare_symbol(
+                        name.clone(),
+                        HirSymbolKind::Function,
+                        Some(HirType::Function),
+                        statement.span,
+                    );
+                }
+                crate::parser::ast_builder::StatementKind::TypeAlias { name, .. } => {
+                    self.declare_symbol(
+                        name.clone(),
+                        HirSymbolKind::Type,
+                        Some(HirType::Unknown),
+                        statement.span,
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn lower_type_alias(
         &mut self,
         name: &str,
@@ -153,12 +201,17 @@ impl HirBuilder {
         span: SourceSpan,
     ) -> HirTypeAlias {
         let alias_type = self.lower_type(alias);
-        let symbol_id = self.declare_symbol(
-            name.to_string(),
-            HirSymbolKind::Type,
-            Some(alias_type.clone()),
-            span,
-        );
+        let symbol_id = if let Some(binding) = self.resolve_current_binding(name) {
+            self.update_symbol_type(binding.symbol_id, Some(alias_type.clone()));
+            binding.symbol_id
+        } else {
+            self.declare_symbol(
+                name.to_string(),
+                HirSymbolKind::Type,
+                Some(alias_type.clone()),
+                span,
+            )
+        };
 
         HirTypeAlias {
             symbol_id,
@@ -180,12 +233,16 @@ impl HirBuilder {
         span: SourceSpan,
     ) -> Result<HirFunction, HirError> {
         let return_type = return_type.as_ref().map(|typ| self.lower_type(typ));
-        let function_symbol = self.declare_symbol(
-            name.to_string(),
-            HirSymbolKind::Function,
-            Some(HirType::Function),
-            span,
-        );
+        let function_symbol = if let Some(binding) = self.resolve_current_binding(name) {
+            binding.symbol_id
+        } else {
+            self.declare_symbol(
+                name.to_string(),
+                HirSymbolKind::Function,
+                Some(HirType::Function),
+                span,
+            )
+        };
         let function_scope = self.enter_scope();
 
         let mut parameters = Vec::new();
@@ -208,6 +265,8 @@ impl HirBuilder {
                 span,
             });
         }
+
+        self.predeclare_module_symbols(body);
 
         let mut function_body = Vec::new();
         for statement in body {
@@ -382,6 +441,12 @@ impl HirBuilder {
                     );
                 }
 
+                self.errors.push(format!(
+                    "Undefined identifier '{}' at {}..{}",
+                    name,
+                    expr.span.start(),
+                    expr.span.end()
+                ));
                 self.expression(
                     HirExpressionKind::GlobalVariable(name.clone()),
                     None,
@@ -456,7 +521,11 @@ impl HirBuilder {
                     .collect();
 
                 if let HirExpressionKind::GlobalVariable(name) = &lowered_callee.kind {
-                    if let Some(builtin) = self.recognize_builtin(name) {
+                    if let Some(builtin) = self.recognize_builtin(name).filter(|_| {
+                        lowered_callee
+                            .symbol_id
+                            .is_some_and(|symbol_id| self.is_builtin_symbol(symbol_id))
+                    }) {
                         let expr_type = self.builtin_result_type(&builtin);
                         return self.expression(
                             HirExpressionKind::BuiltinCall {
@@ -628,13 +697,24 @@ impl HirBuilder {
         value_type: Option<HirType>,
         span: SourceSpan,
     ) -> HirSymbolId {
+        if let Some(existing) = self.resolve_current_binding(&name) {
+            self.errors.push(format!(
+                "Duplicate declaration '{}' in scope #{} at {}..{}",
+                name,
+                self.current_scope_id().0,
+                span.start(),
+                span.end()
+            ));
+            return existing.symbol_id;
+        }
+
         let symbol_id = HirSymbolId::new(self.symbol_counter);
         self.symbol_counter += 1;
         let scope_id = self.current_scope_id();
         self.symbols.push(HirSymbol::new(
             symbol_id,
             name.clone(),
-            kind,
+            kind.clone(),
             scope_id,
             value_type.clone(),
             span,
@@ -652,6 +732,7 @@ impl HirBuilder {
                 HirBinding {
                     symbol_id,
                     variable_id: None,
+                    kind,
                     value_type,
                 },
             );
@@ -666,7 +747,7 @@ impl HirBuilder {
         value_type: Option<HirType>,
         span: SourceSpan,
     ) -> HirSymbolId {
-        let symbol_id = self.declare_symbol(name.clone(), kind, value_type.clone(), span);
+        let symbol_id = self.declare_symbol(name.clone(), kind.clone(), value_type.clone(), span);
         self.bindings
             .last_mut()
             .expect("HIR builder must always have a scope")
@@ -675,10 +756,17 @@ impl HirBuilder {
                 HirBinding {
                     symbol_id,
                     variable_id: Some(variable_id),
+                    kind: kind.clone(),
                     value_type,
                 },
             );
         symbol_id
+    }
+
+    fn resolve_current_binding(&self, name: &str) -> Option<HirBinding> {
+        self.bindings
+            .last()
+            .and_then(|scope| scope.get(name).cloned())
     }
 
     fn resolve_binding(&self, name: &str) -> Option<HirBinding> {
@@ -686,6 +774,30 @@ impl HirBuilder {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn update_symbol_type(&mut self, symbol_id: HirSymbolId, value_type: Option<HirType>) {
+        if let Some(symbol) = self
+            .symbols
+            .iter_mut()
+            .find(|symbol| symbol.id == symbol_id)
+        {
+            symbol.value_type = value_type.clone();
+        }
+
+        for scope in &mut self.bindings {
+            for binding in scope.values_mut() {
+                if binding.symbol_id == symbol_id {
+                    binding.value_type = value_type.clone();
+                }
+            }
+        }
+    }
+
+    fn is_builtin_symbol(&self, symbol_id: HirSymbolId) -> bool {
+        self.symbols
+            .iter()
+            .any(|symbol| symbol.id == symbol_id && symbol.kind == HirSymbolKind::BuiltinFunction)
     }
 
     fn next_function_id(&mut self) -> HirFunctionId {
@@ -806,7 +918,16 @@ impl HirBuilder {
                 "table" => HirType::Table,
                 "function" => HirType::Function,
                 "any" => HirType::Any,
-                _ => HirType::Unknown,
+                _ => self
+                    .resolve_binding(name)
+                    .and_then(|binding| {
+                        if binding.kind == HirSymbolKind::Type {
+                            binding.value_type
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(HirType::Unknown),
             },
             crate::parser::ast_builder::TypeExpressionKind::Optional(inner)
             | crate::parser::ast_builder::TypeExpressionKind::Variadic(inner)
@@ -922,6 +1043,10 @@ mod tests {
     use super::*;
 
     fn lower_source(source: &str) -> HirModule {
+        lower_source_result(source).unwrap()
+    }
+
+    fn lower_source_result(source: &str) -> Result<HirModule, HirError> {
         let mut sources = SourceManager::new();
         let file_id = sources.add_file(PathBuf::from("test.glu"), source.to_string());
         let file = sources.get(file_id).unwrap();
@@ -939,7 +1064,7 @@ mod tests {
 
         let mut parser = Parser::new(&tokens);
         let ast = parser.parse_program();
-        HirBuilder::new().build(&ast).unwrap()
+        HirBuilder::new().build(&ast)
     }
 
     #[test]
@@ -1063,5 +1188,152 @@ mod tests {
             arguments[0].kind,
             HirExpressionKind::InterpolatedString(_)
         ));
+    }
+
+    #[test]
+    fn resolves_builtin_functions_to_symbols() {
+        let module = lower_source("print(\"hello\")");
+        let print_symbol = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "print")
+            .unwrap();
+        let main = module
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let HirStatementKind::Expression(expression) = &main.body[0].kind else {
+            panic!("expected print expression");
+        };
+
+        assert_eq!(print_symbol.kind, HirSymbolKind::BuiltinFunction);
+        assert_eq!(expression.symbol_id, Some(print_symbol.id));
+    }
+
+    #[test]
+    fn resolves_forward_function_references() {
+        let module = lower_source("foo()\nfunction foo()\nend");
+        let foo_symbol = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "foo")
+            .unwrap();
+        let main = module
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let HirStatementKind::Expression(expression) = &main.body[0].kind else {
+            panic!("expected call expression");
+        };
+        let HirExpressionKind::FunctionCall { callee, .. } = &expression.kind else {
+            panic!("expected function call");
+        };
+
+        assert_eq!(callee.symbol_id, Some(foo_symbol.id));
+    }
+
+    #[test]
+    fn resolves_nested_forward_function_references() {
+        let module = lower_source("function outer()\ninner()\nfunction inner()\nend\nend");
+        let inner_symbol = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "inner")
+            .unwrap();
+        let outer = module
+            .functions
+            .iter()
+            .find(|function| function.name == "outer")
+            .unwrap();
+        let HirStatementKind::Expression(expression) = &outer.body[0].kind else {
+            panic!("expected inner call expression");
+        };
+        let HirExpressionKind::FunctionCall { callee, .. } = &expression.kind else {
+            panic!("expected function call");
+        };
+
+        assert_eq!(callee.symbol_id, Some(inner_symbol.id));
+    }
+
+    #[test]
+    fn resolves_nearest_symbol_for_shadowed_names() {
+        let module = lower_source("local x = 1\nfunction f(x: number)\nreturn x\nend\nprint(x)");
+        let outer_symbol = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "x" && symbol.kind == HirSymbolKind::Local)
+            .unwrap();
+        let function = module
+            .functions
+            .iter()
+            .find(|function| function.name == "f")
+            .unwrap();
+        let main = module
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let parameter_symbol = function.parameters[0].symbol_id;
+
+        let HirStatementKind::Return(Some(values)) = &function.body[0].kind else {
+            panic!("expected function return");
+        };
+        let HirStatementKind::Expression(print_expression) = &main.body[1].kind else {
+            panic!("expected print expression");
+        };
+        let HirExpressionKind::BuiltinCall { arguments, .. } = &print_expression.kind else {
+            panic!("expected builtin print");
+        };
+
+        assert_ne!(outer_symbol.id, parameter_symbol);
+        assert_eq!(values[0].symbol_id, Some(parameter_symbol));
+        assert_eq!(arguments[0].symbol_id, Some(outer_symbol.id));
+    }
+
+    #[test]
+    fn shadowed_builtins_resolve_as_regular_functions() {
+        let module = lower_source("function f()\nfunction print()\nend\nprint()\nend");
+        let function = module
+            .functions
+            .iter()
+            .find(|function| function.name == "f")
+            .unwrap();
+        let shadow_symbol = module
+            .symbols
+            .iter()
+            .find(|symbol| {
+                symbol.name == "print"
+                    && symbol.kind == HirSymbolKind::Function
+                    && symbol.scope_id == function.scope_id
+            })
+            .unwrap();
+        let HirStatementKind::Expression(expression) = &function.body[1].kind else {
+            panic!("expected shadowed print call");
+        };
+        let HirExpressionKind::FunctionCall { callee, .. } = &expression.kind else {
+            panic!("expected regular function call");
+        };
+
+        assert_eq!(callee.symbol_id, Some(shadow_symbol.id));
+    }
+
+    #[test]
+    fn reports_undefined_identifiers() {
+        let error = lower_source_result("print(missing)").unwrap_err();
+        assert!(error.to_string().contains("Undefined identifier 'missing'"));
+    }
+
+    #[test]
+    fn reports_duplicate_declarations() {
+        let error = lower_source_result("function foo()\nend\nfunction foo()\nend").unwrap_err();
+        assert!(error.to_string().contains("Duplicate declaration 'foo'"));
+    }
+
+    #[test]
+    fn reports_duplicate_parameters() {
+        let error = lower_source_result("function foo(x, x)\nend").unwrap_err();
+        assert!(error.to_string().contains("Duplicate declaration 'x'"));
     }
 }

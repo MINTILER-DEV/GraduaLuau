@@ -5,10 +5,14 @@ use super::types::HirType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HirSymbolKind {
+    BuiltinFunction,
+    Constant,
     Function,
-    Parameter,
-    Local,
     Global,
+    Local,
+    Module,
+    NativeFunction,
+    Parameter,
     Type,
 }
 
