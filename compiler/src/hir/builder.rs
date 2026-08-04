@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::parser::ast_builder::AstNode;
-use crate::source::SourceSpan;
+use crate::source::{FileId, SourceSpan};
 
 use super::error::HirError;
 use super::expression::{
@@ -11,7 +11,7 @@ use super::function::{HirFunction, HirFunctionMetadata, HirParameter};
 use super::ids::{HirFunctionId, HirScopeId, HirSymbolId, HirVariableId};
 use super::module::{HirModule, HirTypeAlias};
 use super::statement::{HirLocalVariable, HirStatement, HirStatementKind};
-use super::symbol::{HirScope, HirSymbol, HirSymbolKind};
+use super::symbol::{HirScope, HirScopeKind, HirSymbol, HirSymbolKind};
 use super::types::{
     HirBinaryOperator, HirBuiltinFunction, HirCallingConvention, HirFunctionSignature, HirType,
     HirUnaryOperator,
@@ -41,6 +41,7 @@ pub struct HirBuilder {
 impl HirBuilder {
     pub fn new() -> Self {
         let root_scope = HirScopeId::new(0);
+        let root_span = SourceSpan::new(FileId::new(0), 0, 0);
 
         Self {
             function_counter: 0,
@@ -49,7 +50,12 @@ impl HirBuilder {
             scope_counter: 1,
             scope_ids: vec![root_scope],
             bindings: vec![HashMap::new()],
-            scopes: vec![HirScope::new(root_scope, None)],
+            scopes: vec![HirScope::new(
+                root_scope,
+                None,
+                HirScopeKind::Global,
+                root_span,
+            )],
             symbols: Vec::new(),
             errors: Vec::new(),
         }
@@ -272,7 +278,7 @@ impl HirBuilder {
                 span,
             )
         };
-        let function_scope = self.enter_scope();
+        let function_scope = self.enter_scope(HirScopeKind::Function, span);
 
         let mut parameters = Vec::new();
         for (param_name, param_type) in params {
@@ -758,13 +764,17 @@ impl HirBuilder {
         }
     }
 
-    fn enter_scope(&mut self) -> HirScopeId {
+    fn enter_scope(&mut self, kind: HirScopeKind, span: SourceSpan) -> HirScopeId {
         let parent = self.current_scope_id();
         let scope_id = HirScopeId::new(self.scope_counter);
         self.scope_counter += 1;
         self.scope_ids.push(scope_id);
         self.bindings.push(HashMap::new());
-        self.scopes.push(HirScope::new(scope_id, Some(parent)));
+        if let Some(parent_scope) = self.scopes.iter_mut().find(|scope| scope.id == parent) {
+            parent_scope.children.push(scope_id);
+        }
+        self.scopes
+            .push(HirScope::new(scope_id, Some(parent), kind, span));
         scope_id
     }
 
@@ -1410,6 +1420,7 @@ impl HirBuilder {
 mod tests {
     use std::path::PathBuf;
 
+    use crate::hir::HirPrinter;
     use crate::lexer::{Lexer, TokenKind};
     use crate::parser::ast_builder::AstNode;
     use crate::parser::Parser;
@@ -1930,6 +1941,92 @@ mod tests {
         };
 
         assert_eq!(callee.symbol_id, Some(shadow_symbol.id));
+    }
+
+    #[test]
+    fn builds_scope_tree_for_nested_functions() {
+        let module = lower_source("function outer()\nfunction inner()\nend\nend");
+        let root_scope_id = module.metadata.root_scope.unwrap();
+        let root_scope = module
+            .scopes
+            .iter()
+            .find(|scope| scope.id == root_scope_id)
+            .unwrap();
+        let outer = module
+            .functions
+            .iter()
+            .find(|function| function.name == "outer")
+            .unwrap();
+        let HirStatementKind::Function { function: inner } = &outer.body[0].kind else {
+            panic!("expected nested inner function");
+        };
+        let outer_scope = module
+            .scopes
+            .iter()
+            .find(|scope| scope.id == outer.scope_id)
+            .unwrap();
+        let inner_scope = module
+            .scopes
+            .iter()
+            .find(|scope| scope.id == inner.scope_id)
+            .unwrap();
+
+        assert_eq!(root_scope.kind, HirScopeKind::Global);
+        assert!(root_scope.children.contains(&outer.scope_id));
+        assert_eq!(outer_scope.kind, HirScopeKind::Function);
+        assert_eq!(outer_scope.parent, Some(root_scope_id));
+        assert!(outer_scope.children.contains(&inner.scope_id));
+        assert_eq!(inner_scope.kind, HirScopeKind::Function);
+        assert_eq!(inner_scope.parent, Some(outer.scope_id));
+    }
+
+    #[test]
+    fn registers_symbols_in_declaring_scopes() {
+        let module = lower_source("function outer(x: integer)\nfunction inner()\nend\nend");
+        let root_scope_id = module.metadata.root_scope.unwrap();
+        let outer = module
+            .functions
+            .iter()
+            .find(|function| function.name == "outer")
+            .unwrap();
+        let outer_symbol = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "outer")
+            .unwrap();
+        let inner_symbol = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "inner")
+            .unwrap();
+        let parameter_symbol = outer.parameters[0].symbol_id;
+
+        assert_eq!(outer_symbol.scope_id, root_scope_id);
+        assert_eq!(inner_symbol.scope_id, outer.scope_id);
+        assert!(module
+            .scopes
+            .iter()
+            .find(|scope| scope.id == outer.scope_id)
+            .unwrap()
+            .symbols
+            .contains(&parameter_symbol));
+    }
+
+    #[test]
+    fn declarations_leave_scope_after_function_exit() {
+        let error = lower_source_result("function outer()\nlocal hidden = 1\nend\nprint(hidden)")
+            .unwrap_err();
+        assert!(error.to_string().contains("Undefined identifier 'hidden'"));
+    }
+
+    #[test]
+    fn prints_scope_tree_debug_output() {
+        let module = lower_source("function outer()\nfunction inner()\nend\nend");
+        let output = HirPrinter::new().print_module(&module);
+
+        assert!(output.contains("Scope #0 Global"));
+        assert!(output.contains("Function"));
+        assert!(output.contains("children="));
     }
 
     #[test]

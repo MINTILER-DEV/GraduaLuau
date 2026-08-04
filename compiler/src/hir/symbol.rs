@@ -3,6 +3,20 @@ use crate::source::SourceSpan;
 use super::ids::{HirScopeId, HirSymbolId};
 use super::types::{HirFunctionSignature, HirType};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirScopeKind {
+    Global,
+    Module,
+    Function,
+    Block,
+    If,
+    Else,
+    While,
+    Repeat,
+    For,
+    GenericBlock,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HirSymbolKind {
     BuiltinFunction,
@@ -53,15 +67,26 @@ impl HirSymbol {
 pub struct HirScope {
     pub id: HirScopeId,
     pub parent: Option<HirScopeId>,
+    pub children: Vec<HirScopeId>,
+    pub kind: HirScopeKind,
     pub symbols: Vec<HirSymbolId>,
+    pub span: SourceSpan,
 }
 
 impl HirScope {
-    pub fn new(id: HirScopeId, parent: Option<HirScopeId>) -> Self {
+    pub fn new(
+        id: HirScopeId,
+        parent: Option<HirScopeId>,
+        kind: HirScopeKind,
+        span: SourceSpan,
+    ) -> Self {
         Self {
             id,
             parent,
+            children: Vec::new(),
+            kind,
             symbols: Vec::new(),
+            span,
         }
     }
 }

@@ -25,7 +25,7 @@ pub use ids::{HirFunctionId, HirScopeId, HirSymbolId, HirVariableId};
 pub use module::{HirGlobalVariable, HirModule, HirTypeAlias};
 pub use printer::HirPrinter;
 pub use statement::{HirLocalVariable, HirStatement, HirStatementKind};
-pub use symbol::{HirScope, HirSymbol, HirSymbolKind};
+pub use symbol::{HirScope, HirScopeKind, HirSymbol, HirSymbolKind};
 pub use types::{
     HirBinaryOperator, HirBuiltinFunction, HirCallingConvention, HirFunctionSignature, HirType,
     HirUnaryOperator,

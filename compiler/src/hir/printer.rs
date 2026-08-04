@@ -4,6 +4,7 @@ use super::expression::{
 use super::function::HirFunction;
 use super::module::{HirGlobalVariable, HirModule, HirTypeAlias};
 use super::statement::{HirStatement, HirStatementKind};
+use super::symbol::HirScope;
 use super::types::{HirBinaryOperator, HirUnaryOperator};
 
 pub struct HirPrinter {
@@ -25,18 +26,12 @@ impl HirPrinter {
             output.push_str(&self.indent_str());
             output.push_str("Scopes:\n");
             self.indent += 2;
-            for scope in &module.scopes {
-                output.push_str(&self.indent_str());
-                output.push_str(&format!(
-                    "Scope #{} parent={:?} symbols={:?}\n",
-                    scope.id.0,
-                    scope.parent.map(|parent| parent.0),
-                    scope
-                        .symbols
-                        .iter()
-                        .map(|symbol| symbol.0)
-                        .collect::<Vec<_>>()
-                ));
+            if let Some(root_scope) = module.metadata.root_scope {
+                output.push_str(&self.print_scope_tree(module, root_scope));
+            } else {
+                for scope in &module.scopes {
+                    output.push_str(&self.print_scope(scope));
+                }
             }
             self.indent -= 2;
         }
@@ -89,6 +84,41 @@ impl HirPrinter {
 
         self.indent -= 2;
         output
+    }
+
+    fn print_scope_tree(&mut self, module: &HirModule, scope_id: super::ids::HirScopeId) -> String {
+        let mut output = String::new();
+        if let Some(scope) = module.scopes.iter().find(|scope| scope.id == scope_id) {
+            output.push_str(&self.print_scope(scope));
+            self.indent += 2;
+            for child in &scope.children {
+                output.push_str(&self.print_scope_tree(module, *child));
+            }
+            self.indent -= 2;
+        }
+        output
+    }
+
+    fn print_scope(&self, scope: &HirScope) -> String {
+        format!(
+            "{}Scope #{} {:?} parent={:?} children={:?} symbols={:?} span={}..{}\n",
+            self.indent_str(),
+            scope.id.0,
+            scope.kind,
+            scope.parent.map(|parent| parent.0),
+            scope
+                .children
+                .iter()
+                .map(|child| child.0)
+                .collect::<Vec<_>>(),
+            scope
+                .symbols
+                .iter()
+                .map(|symbol| symbol.0)
+                .collect::<Vec<_>>(),
+            scope.span.start(),
+            scope.span.end()
+        )
     }
 
     fn print_type_alias(&mut self, type_alias: &HirTypeAlias) -> String {
