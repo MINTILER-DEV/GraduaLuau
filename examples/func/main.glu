@@ -14,5 +14,5 @@ end
 greet()
 local squared = square(13)
 print "Square demo\n"
-print `{squared}\n"
-print score
+print tostring(squared) .. "\n"
+print tostring(score) .. "\n"
