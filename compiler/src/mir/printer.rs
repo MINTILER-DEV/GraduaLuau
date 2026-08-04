@@ -36,6 +36,9 @@ impl MirPrinter {
         for block in &function.blocks {
             output.push_str(&self.print_block(block));
         }
+        if function.cfg.is_some() {
+            output.push_str(&self.print_cfg(function));
+        }
         self.indent -= 2;
 
         output
@@ -53,14 +56,85 @@ impl MirPrinter {
             ""
         };
 
-        output.push_str(&format!("{}Block{}:\n", block_type, block.id.0));
+        output.push_str(&format!(
+            "{}Block{} '{}':\n",
+            block_type, block.id.0, block.name
+        ));
 
         self.indent += 2;
+        if !block.predecessors.is_empty() {
+            let predecessors: Vec<String> = block
+                .predecessors
+                .iter()
+                .map(|block_id| format!("Block{}", block_id.0))
+                .collect();
+            output.push_str(&self.indent_str());
+            output.push_str(&format!("predecessors: {}\n", predecessors.join(", ")));
+        }
+        if !block.successors.is_empty() {
+            let successors: Vec<String> = block
+                .successors
+                .iter()
+                .map(|block_id| format!("Block{}", block_id.0))
+                .collect();
+            output.push_str(&self.indent_str());
+            output.push_str(&format!("successors: {}\n", successors.join(", ")));
+        }
         for instruction in &block.instructions {
             output.push_str(&self.print_instruction(instruction));
         }
         self.indent -= 2;
 
+        output
+    }
+
+    pub fn print_cfg(&mut self, function: &MirFunction) -> String {
+        let mut output = String::new();
+        let Some(cfg) = function.cfg.as_ref() else {
+            return output;
+        };
+
+        output.push_str(&self.indent_str());
+        output.push_str("CFG:\n");
+        self.indent += 2;
+        output.push_str(&self.indent_str());
+        output.push_str(&format!("entry: Block{}\n", cfg.entry.0));
+
+        if !cfg.exits.is_empty() {
+            let exits: Vec<String> = cfg
+                .exits
+                .iter()
+                .map(|block_id| format!("Block{}", block_id.0))
+                .collect();
+            output.push_str(&self.indent_str());
+            output.push_str(&format!("exits: {}\n", exits.join(", ")));
+        }
+
+        for edge in &cfg.edges {
+            output.push_str(&self.indent_str());
+            output.push_str(&format!(
+                "edge Block{} -> Block{} ({})\n",
+                edge.source.0,
+                edge.target.0,
+                edge.kind.label()
+            ));
+        }
+
+        for loop_info in &cfg.loops {
+            let blocks: Vec<String> = loop_info
+                .body_blocks
+                .iter()
+                .map(|block_id| format!("Block{}", block_id.0))
+                .collect();
+            output.push_str(&self.indent_str());
+            output.push_str(&format!(
+                "loop header Block{} body [{}]\n",
+                loop_info.header.0,
+                blocks.join(", ")
+            ));
+        }
+
+        self.indent -= 2;
         output
     }
 

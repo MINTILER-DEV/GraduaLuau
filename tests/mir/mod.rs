@@ -315,7 +315,10 @@ end
     let square = &mir.functions[0];
 
     assert_eq!(square.parameter_data.len(), 1);
-    assert_eq!(square.locals.len(), 1);
+    assert!(square
+        .locals
+        .iter()
+        .any(|local| local.storage == square.parameter_data[0].storage));
     assert!(matches!(
         square.values[0].kind,
         MirValueKind::Parameter { .. }
@@ -349,12 +352,10 @@ end
     for function in &mir.functions {
         for block in &function.blocks {
             assert!(block.terminator.is_some());
-            assert!(
-                block
-                    .instructions
-                    .last()
-                    .is_some_and(|instruction| instruction.is_terminator())
-            );
+            assert!(block
+                .instructions
+                .last()
+                .is_some_and(|instruction| instruction.is_terminator()));
             assert_eq!(
                 block
                     .instructions
@@ -431,12 +432,10 @@ end
         .filter(|instruction| matches!(instruction.kind, MirInstructionKind::TableSet { .. }))
         .count();
 
-    assert!(
-        function.blocks[0]
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction.kind, MirInstructionKind::TableNew { .. }))
-    );
+    assert!(function.blocks[0]
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction.kind, MirInstructionKind::TableNew { .. })));
     assert_eq!(table_sets, 3);
 }
 
@@ -459,7 +458,9 @@ fn manual_hir_if_lowers_to_branch_cfg() {
     let mir = MirStage::lower(&module).expect("manual if HIR should lower");
     let function = &mir.functions[0];
 
-    assert_eq!(function.blocks.len(), 4);
+    assert_eq!(function.blocks.len(), 5);
+    assert_eq!(function.exit_blocks.len(), 1);
+    assert!(function.blocks[4].is_exit);
     assert!(matches!(
         function.blocks[0].terminator,
         Some(MirTerminator::Branch { .. })
@@ -474,6 +475,10 @@ fn manual_hir_if_lowers_to_branch_cfg() {
     ));
     assert!(matches!(
         function.blocks[3].terminator,
+        Some(MirTerminator::Jump { .. })
+    ));
+    assert!(matches!(
+        function.blocks[4].terminator,
         Some(MirTerminator::Return { .. })
     ));
     assert_eq!(function.blocks[3].predecessors.len(), 2);
@@ -497,7 +502,9 @@ fn manual_hir_while_lowers_to_loop_cfg() {
     let mir = MirStage::lower(&module).expect("manual while HIR should lower");
     let function = &mir.functions[0];
 
-    assert_eq!(function.blocks.len(), 4);
+    assert_eq!(function.blocks.len(), 5);
+    assert_eq!(function.exit_blocks.len(), 1);
+    assert!(function.blocks[4].is_exit);
     assert!(matches!(
         function.blocks[0].terminator,
         Some(MirTerminator::Jump { .. })
@@ -512,9 +519,122 @@ fn manual_hir_while_lowers_to_loop_cfg() {
     ));
     assert!(matches!(
         function.blocks[3].terminator,
+        Some(MirTerminator::Jump { .. })
+    ));
+    assert!(matches!(
+        function.blocks[4].terminator,
         Some(MirTerminator::Return { .. })
     ));
     assert_eq!(function.blocks[1].predecessors.len(), 2);
+}
+
+#[test]
+fn multiple_returns_share_one_exit_block() {
+    let span = test_span();
+    let module = manual_module(
+        "returns",
+        vec![HirStatement {
+            kind: HirStatementKind::If {
+                condition: bool_expr(true, span),
+                then_block: vec![return_bool_stmt(true, span)],
+                else_block: Some(vec![return_bool_stmt(false, span)]),
+            },
+            span,
+        }],
+        Some(HirType::Boolean),
+    );
+
+    let mir = MirStage::lower(&module).expect("manual returns should lower");
+    let function = &mir.functions[0];
+
+    assert_eq!(function.exit_blocks.len(), 1);
+    assert!(function.blocks[3].is_exit);
+    assert!(matches!(
+        function.blocks[3].terminator,
+        Some(MirTerminator::Return { .. })
+    ));
+    assert_eq!(function.blocks[3].predecessors.len(), 2);
+    assert!(function
+        .blocks
+        .iter()
+        .take(3)
+        .all(|block| { !matches!(block.terminator, Some(MirTerminator::Return { .. })) }));
+}
+
+#[test]
+fn cfg_tracks_edges_reachability_and_traversals() {
+    let span = test_span();
+    let module = manual_module(
+        "branchy",
+        vec![HirStatement {
+            kind: HirStatementKind::If {
+                condition: bool_expr(true, span),
+                then_block: Vec::new(),
+                else_block: Some(Vec::new()),
+            },
+            span,
+        }],
+        None,
+    );
+
+    let mir = MirStage::lower(&module).expect("manual if HIR should lower");
+    let cfg = mir.functions[0].cfg.as_ref().expect("CFG should be built");
+
+    assert!(cfg.validate().is_ok());
+    assert_eq!(cfg.edges.len(), 5);
+    assert_eq!(cfg.unreachable_blocks(), Vec::new());
+    assert_eq!(cfg.bfs().first(), Some(&cfg.entry));
+    assert_eq!(cfg.dfs().first(), Some(&cfg.entry));
+    assert_eq!(cfg.reverse_post_order().first(), Some(&cfg.entry));
+    assert!(cfg.to_dot("branchy").contains("Block"));
+}
+
+#[test]
+fn cfg_detects_natural_while_loop() {
+    let span = test_span();
+    let module = manual_module(
+        "loopy",
+        vec![HirStatement {
+            kind: HirStatementKind::While {
+                condition: bool_expr(true, span),
+                body: Vec::new(),
+            },
+            span,
+        }],
+        None,
+    );
+
+    let mir = MirStage::lower(&module).expect("manual while HIR should lower");
+    let cfg = mir.functions[0].cfg.as_ref().expect("CFG should be built");
+
+    assert_eq!(cfg.loops.len(), 1);
+    assert!(cfg.loops[0]
+        .body_blocks
+        .contains(&function_block_id(&mir.functions[0], 1)));
+    assert!(!cfg.loops[0].exit_edges.is_empty());
+}
+
+#[test]
+fn validator_rejects_cfg_block_edge_mismatches() {
+    let span = test_span();
+    let module = manual_module(
+        "branchy",
+        vec![HirStatement {
+            kind: HirStatementKind::If {
+                condition: bool_expr(true, span),
+                then_block: Vec::new(),
+                else_block: Some(Vec::new()),
+            },
+            span,
+        }],
+        None,
+    );
+
+    let mut mir = MirStage::lower(&module).expect("manual if HIR should lower");
+    mir.functions[0].blocks[0].successors.clear();
+
+    let mut validator = MirValidator::new();
+    assert!(validator.validate(&mir).is_err());
 }
 
 fn test_span() -> SourceSpan {
@@ -529,6 +649,19 @@ fn bool_expr(value: bool, span: SourceSpan) -> HirExpression {
         span,
     }
 }
+
+fn return_bool_stmt(value: bool, span: SourceSpan) -> HirStatement {
+    HirStatement {
+        kind: HirStatementKind::Return(Some(vec![bool_expr(value, span)])),
+        span,
+    }
+}
+
+fn function_block_id(function: &HirLoweredMirFunction, index: usize) -> compiler::mir::MirBlockId {
+    function.blocks[index].id
+}
+
+type HirLoweredMirFunction = compiler::mir::MirFunction;
 
 fn manual_module(
     function_name: &str,

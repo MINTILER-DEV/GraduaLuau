@@ -75,6 +75,8 @@ impl MirValidator {
             self.validate_block(block, function, &value_ids);
         }
 
+        self.validate_cfg(function);
+
         let has_exit = function.blocks.iter().any(|block| {
             matches!(
                 block.terminator,
@@ -86,6 +88,80 @@ impl MirValidator {
             self.errors.push(MirValidationError::MissingExitPath {
                 function: function.name.clone(),
             });
+        }
+    }
+
+    fn validate_cfg(&mut self, function: &MirFunction) {
+        let Some(cfg) = function.cfg.as_ref() else {
+            self.errors.push(MirValidationError::InvalidInstruction {
+                message: format!("Function '{}' has no CFG", function.name),
+            });
+            return;
+        };
+
+        if let Err(cfg_errors) = cfg.validate() {
+            self.errors.push(MirValidationError::InvalidInstruction {
+                message: format!(
+                    "Function '{}' has invalid CFG: {:?}",
+                    function.name, cfg_errors
+                ),
+            });
+        }
+
+        for block_id in cfg.unreachable_blocks() {
+            self.errors.push(MirValidationError::UnreachableBlock {
+                block_id: block_id.0,
+            });
+        }
+
+        for block in &function.blocks {
+            if let Some(node) = cfg.nodes.get(&block.id) {
+                if node.successors != block.successors {
+                    self.errors.push(MirValidationError::InvalidInstruction {
+                        message: format!(
+                            "Block {} CFG successors do not match block successors",
+                            block.id.0
+                        ),
+                    });
+                }
+
+                let mut node_predecessors = node.predecessors.clone();
+                let mut block_predecessors = block.predecessors.clone();
+                node_predecessors.sort_by_key(|block_id| block_id.0);
+                block_predecessors.sort_by_key(|block_id| block_id.0);
+
+                if node_predecessors != block_predecessors {
+                    self.errors.push(MirValidationError::InvalidInstruction {
+                        message: format!(
+                            "Block {} CFG predecessors do not match block predecessors",
+                            block.id.0
+                        ),
+                    });
+                }
+            } else {
+                self.errors.push(MirValidationError::InvalidInstruction {
+                    message: format!("Block {} is missing from CFG", block.id.0),
+                });
+            }
+        }
+
+        if let Some(entry_block_index) = function.entry_block {
+            if let Some(entry_block) = function.blocks.get(entry_block_index) {
+                if cfg.entry != entry_block.id {
+                    self.errors.push(MirValidationError::InvalidInstruction {
+                        message: format!("Function '{}' CFG entry mismatch", function.name),
+                    });
+                }
+
+                if !entry_block.predecessors.is_empty() {
+                    self.errors.push(MirValidationError::InvalidInstruction {
+                        message: format!(
+                            "Function '{}' entry block has predecessors",
+                            function.name
+                        ),
+                    });
+                }
+            }
         }
     }
 

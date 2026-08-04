@@ -6,6 +6,7 @@
 
 pub mod block;
 pub mod builder;
+pub mod cfg;
 pub mod error;
 pub mod function;
 pub mod instruction;
@@ -19,6 +20,9 @@ pub mod value;
 // Re-export commonly used types for convenience
 pub use block::MirBasicBlock;
 pub use builder::MirBuilder;
+pub use cfg::{
+    MirCfgEdge, MirCfgEdgeKind, MirCfgNode, MirCfgValidationError, MirControlFlowGraph, MirLoop,
+};
 pub use error::MirError;
 pub use function::MirFunction;
 pub use instruction::{MirInstruction, MirInstructionKind, MirTerminator};

@@ -1,10 +1,10 @@
 use crate::llvm::error::LlvmError;
-use crate::llvm::types::{LlvmType, map_mir_type};
-use crate::mir::MirModule;
+use crate::llvm::types::{map_mir_type, LlvmType};
 use crate::mir::block::MirBasicBlock;
 use crate::mir::function::MirFunction;
 use crate::mir::instruction::{MirInstruction, MirInstructionKind};
-use crate::mir::types::{MirCompareOperator, MirType, MirValue, MirValueId};
+use crate::mir::types::{MirBlockId, MirCompareOperator, MirType, MirValue, MirValueId};
+use crate::mir::MirModule;
 use std::collections::HashMap;
 
 pub struct LlvmGenerator {
@@ -98,6 +98,7 @@ impl LlvmGenerator {
         let return_type = self.function_return_type(function);
         let local_slots = self.collect_local_slots(function);
         let value_types = self.collect_value_types(function);
+        let block_labels = self.collect_block_labels(function);
 
         // Function signature
         ir.push_str(&format!(
@@ -125,7 +126,14 @@ impl LlvmGenerator {
 
         // Generate basic blocks
         for block in &function.blocks {
-            self.generate_block(block, function, &local_slots, &value_types, ir)?;
+            self.generate_block(
+                block,
+                function,
+                &local_slots,
+                &value_types,
+                &block_labels,
+                ir,
+            )?;
         }
 
         ir.push_str("}\n\n");
@@ -139,13 +147,10 @@ impl LlvmGenerator {
         function: &MirFunction,
         local_slots: &HashMap<String, LlvmType>,
         value_types: &HashMap<MirValueId, LlvmType>,
+        block_labels: &HashMap<MirBlockId, String>,
         ir: &mut String,
     ) -> Result<(), LlvmError> {
-        let block_label = if block.is_entry {
-            "entry".to_string()
-        } else {
-            format!("block{}", block.id.0)
-        };
+        let block_label = self.block_label(block_labels, block.id);
 
         ir.push_str(&format!("{}:\n", block_label));
 
@@ -174,7 +179,7 @@ impl LlvmGenerator {
         }
 
         for instruction in &block.instructions {
-            self.generate_instruction(instruction, local_slots, value_types, ir)?;
+            self.generate_instruction(instruction, local_slots, value_types, block_labels, ir)?;
         }
 
         Ok(())
@@ -185,6 +190,7 @@ impl LlvmGenerator {
         instruction: &MirInstruction,
         local_slots: &HashMap<String, LlvmType>,
         value_types: &HashMap<MirValueId, LlvmType>,
+        block_labels: &HashMap<MirBlockId, String>,
         ir: &mut String,
     ) -> Result<(), LlvmError> {
         ir.push_str("    ");
@@ -412,16 +418,8 @@ impl LlvmGenerator {
                 true_block,
                 false_block,
             } => {
-                let true_label = if true_block.0 == 0 {
-                    "entry"
-                } else {
-                    &format!("block{}", true_block.0)
-                };
-                let false_label = if false_block.0 == 0 {
-                    "entry"
-                } else {
-                    &format!("block{}", false_block.0)
-                };
+                let true_label = self.block_label(block_labels, *true_block);
+                let false_label = self.block_label(block_labels, *false_block);
                 ir.push_str(&format!(
                     "br i1 %{}, label %{}, label %{}\n",
                     condition.0, true_label, false_label
@@ -429,11 +427,7 @@ impl LlvmGenerator {
             }
 
             MirInstructionKind::Jump { target } => {
-                let label = if target.0 == 0 {
-                    "entry"
-                } else {
-                    &format!("block{}", target.0)
-                };
+                let label = self.block_label(block_labels, *target);
                 ir.push_str(&format!("br label %{}\n", label));
             }
 
@@ -608,6 +602,21 @@ impl LlvmGenerator {
             .collect()
     }
 
+    fn collect_block_labels(&self, function: &MirFunction) -> HashMap<MirBlockId, String> {
+        function
+            .blocks
+            .iter()
+            .map(|block| {
+                let label = if block.is_entry {
+                    "entry".to_string()
+                } else {
+                    format!("block{}", block.id.0)
+                };
+                (block.id, label)
+            })
+            .collect()
+    }
+
     fn llvm_value_type(
         &self,
         value_types: &HashMap<MirValueId, LlvmType>,
@@ -629,6 +638,17 @@ impl LlvmGenerator {
         } else {
             format!("@{}", name)
         }
+    }
+
+    fn block_label(
+        &self,
+        block_labels: &HashMap<MirBlockId, String>,
+        block_id: MirBlockId,
+    ) -> String {
+        block_labels
+            .get(&block_id)
+            .cloned()
+            .unwrap_or_else(|| format!("block{}", block_id.0))
     }
 
     fn print_function_for_type(&self, value_type: &LlvmType) -> &'static str {

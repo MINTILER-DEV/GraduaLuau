@@ -1,6 +1,7 @@
 use super::block::MirBasicBlock;
+use super::cfg::MirControlFlowGraph;
 use super::instruction::MirInstruction;
-use super::types::{MirFunctionId, MirType};
+use super::types::{MirBlockId, MirFunctionId, MirType};
 use super::value::{MirLocal, MirParameter, MirValueData};
 use crate::source::SourceSpan;
 
@@ -16,6 +17,7 @@ pub struct MirFunction {
     pub blocks: Vec<MirBasicBlock>,
     pub entry_block: Option<usize>,
     pub exit_blocks: Vec<usize>,
+    pub cfg: Option<MirControlFlowGraph>,
     pub metadata: MirFunctionMetadata,
 }
 
@@ -32,12 +34,24 @@ impl MirFunction {
             blocks: Vec::new(),
             entry_block: None,
             exit_blocks: Vec::new(),
+            cfg: None,
             metadata: MirFunctionMetadata::default(),
         }
     }
 
     pub fn add_block(&mut self, block: MirBasicBlock) {
         self.blocks.push(block);
+    }
+
+    pub fn add_named_block(
+        &mut self,
+        id: MirBlockId,
+        name: impl Into<String>,
+        span: Option<SourceSpan>,
+    ) -> usize {
+        let index = self.blocks.len();
+        self.blocks.push(MirBasicBlock::with_name(id, name, span));
+        index
     }
 
     pub fn add_instruction(&mut self, block_index: usize, instruction: MirInstruction) {
@@ -92,6 +106,12 @@ impl MirFunction {
                 }
             }
         }
+
+        self.rebuild_control_flow_graph();
+    }
+
+    pub fn rebuild_control_flow_graph(&mut self) {
+        self.cfg = MirControlFlowGraph::build(self);
     }
 }
 

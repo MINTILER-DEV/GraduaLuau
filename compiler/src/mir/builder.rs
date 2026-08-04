@@ -21,6 +21,8 @@ pub struct MirBuilder {
     block_counter: usize,
     function_counter: usize,
     variable_symbols: HashMap<HirVariableId, usize>,
+    active_exit_block: Option<MirBlockId>,
+    active_return_slot: Option<String>,
 }
 
 impl MirBuilder {
@@ -30,7 +32,73 @@ impl MirBuilder {
             block_counter: 0,
             function_counter: 0,
             variable_symbols: HashMap::new(),
+            active_exit_block: None,
+            active_return_slot: None,
         }
+    }
+
+    pub fn create_block(
+        &mut self,
+        mir_function: &mut MirFunction,
+        name: impl Into<String>,
+        span: Option<SourceSpan>,
+    ) -> usize {
+        let id = self.new_block_id();
+        mir_function.add_named_block(id, name, span)
+    }
+
+    pub fn switch_block(
+        &self,
+        mir_function: &MirFunction,
+        block_id: MirBlockId,
+    ) -> Result<usize, MirError> {
+        mir_function
+            .blocks
+            .iter()
+            .position(|block| block.id == block_id)
+            .ok_or_else(|| MirError::LoweringError(format!("unknown MIR block {}", block_id.0)))
+    }
+
+    pub fn current_block(&self, mir_function: &MirFunction) -> Option<usize> {
+        mir_function
+            .blocks
+            .iter()
+            .rposition(|block| !block.is_terminated())
+            .or_else(|| mir_function.blocks.len().checked_sub(1))
+    }
+
+    pub fn append_instruction(
+        &mut self,
+        mir_function: &mut MirFunction,
+        block_index: usize,
+        instruction: MirInstruction,
+    ) -> Result<(), MirError> {
+        self.emit_instruction(
+            mir_function,
+            block_index,
+            instruction.kind,
+            instruction.result_type,
+            instruction.span,
+        )
+    }
+
+    pub fn append_terminator(
+        &mut self,
+        mir_function: &mut MirFunction,
+        block_index: usize,
+        instruction: MirInstruction,
+    ) -> Result<(), MirError> {
+        self.emit_terminator(
+            mir_function,
+            block_index,
+            instruction.kind,
+            instruction.result_type,
+            instruction.span,
+        )
+    }
+
+    pub fn connect_blocks(&self, mir_function: &mut MirFunction) {
+        mir_function.rebuild_cfg();
     }
 
     pub fn build(&mut self, hir_module: &HirModule) -> Result<MirModule, MirError> {
@@ -84,7 +152,8 @@ impl MirBuilder {
         self.function_counter += 1;
 
         let mut mir_function = MirFunction::new(function_id, hir_function.name.clone());
-        mir_function.return_type = Some(self.infer_function_return_type(hir_function));
+        let return_type = self.infer_function_return_type(hir_function);
+        mir_function.return_type = Some(return_type.clone());
         mir_function.metadata.span = Some(hir_function.span);
         mir_function.metadata.has_explicit_return = hir_function.metadata.has_explicit_return;
 
@@ -130,6 +199,31 @@ impl MirBuilder {
             self.register_local(local, &mut mir_function);
         }
 
+        let previous_exit_block = self.active_exit_block;
+        let previous_return_slot = self.active_return_slot.clone();
+        let exit_block_id = self.new_block_id();
+        self.active_exit_block = Some(exit_block_id);
+        self.active_return_slot = (return_type != MirType::Void).then(|| {
+            let storage = "local_return".to_string();
+            let value_id = self.new_value(
+                &mut mir_function,
+                MirValueKind::Local {
+                    storage: storage.clone(),
+                    symbol_id: None,
+                },
+                return_type.clone(),
+                Some(hir_function.span),
+            );
+            mir_function.add_local(MirLocal {
+                storage: storage.clone(),
+                value_id,
+                value_type: return_type.clone(),
+                symbol_id: None,
+                span: Some(hir_function.span),
+            });
+            storage
+        });
+
         let entry_block_id = self.new_block_id();
         let entry_block = MirBasicBlock::with_entry(entry_block_id);
         mir_function.entry_block = Some(0);
@@ -154,6 +248,50 @@ impl MirBuilder {
             self.emit_terminator(
                 &mut mir_function,
                 current_block,
+                MirInstructionKind::Jump {
+                    target: exit_block_id,
+                },
+                None,
+                Some(hir_function.span),
+            )?;
+        }
+
+        let exit_index = mir_function.blocks.len();
+        let mut exit_block = MirBasicBlock::with_exit(exit_block_id);
+        exit_block.span = Some(hir_function.span);
+        mir_function.add_block(exit_block);
+
+        if let Some(return_slot) = self.active_return_slot.clone() {
+            let return_value = self.new_value(
+                &mut mir_function,
+                MirValueKind::Temporary,
+                return_type,
+                Some(hir_function.span),
+            );
+            let return_value_type = self.value_type(&mir_function, return_value);
+            self.emit_instruction(
+                &mut mir_function,
+                exit_index,
+                MirInstructionKind::Load {
+                    result: return_value,
+                    name: return_slot,
+                },
+                return_value_type,
+                Some(hir_function.span),
+            )?;
+            self.emit_terminator(
+                &mut mir_function,
+                exit_index,
+                MirInstructionKind::Return {
+                    value: Some(return_value),
+                },
+                Some(MirType::Void),
+                Some(hir_function.span),
+            )?;
+        } else {
+            self.emit_terminator(
+                &mut mir_function,
+                exit_index,
                 MirInstructionKind::Return { value: None },
                 Some(MirType::Void),
                 Some(hir_function.span),
@@ -171,6 +309,9 @@ impl MirBuilder {
                 })
             })
             .collect();
+
+        self.active_exit_block = previous_exit_block;
+        self.active_return_slot = previous_return_slot;
 
         Ok(mir_function)
     }
@@ -272,15 +413,7 @@ impl MirBuilder {
                     .map(|expression| self.lower_expression(expression, mir_function, block_index))
                     .transpose()?;
 
-                self.emit_terminator(
-                    mir_function,
-                    block_index,
-                    MirInstructionKind::Return {
-                        value: return_value,
-                    },
-                    Some(MirType::Void),
-                    Some(statement.span),
-                )?;
+                self.emit_return_to_exit(mir_function, block_index, return_value, statement.span)?;
                 Ok(block_index)
             }
             HirStatementKind::Block(statements) => {
@@ -349,7 +482,8 @@ impl MirBuilder {
 
         let then_index = self.push_block(mir_function, then_block_id);
         let then_end = self.lower_statement_block(then_block, mir_function, then_index)?;
-        if !mir_function.is_block_terminated(then_end) {
+        let then_falls_through = !mir_function.is_block_terminated(then_end);
+        if then_falls_through {
             self.emit_terminator(
                 mir_function,
                 then_end,
@@ -367,7 +501,8 @@ impl MirBuilder {
         } else {
             else_index
         };
-        if !mir_function.is_block_terminated(else_end) {
+        let else_falls_through = !mir_function.is_block_terminated(else_end);
+        if else_falls_through {
             self.emit_terminator(
                 mir_function,
                 else_end,
@@ -379,7 +514,11 @@ impl MirBuilder {
             )?;
         }
 
-        Ok(self.push_block(mir_function, merge_block_id))
+        if then_falls_through || else_falls_through {
+            Ok(self.push_block(mir_function, merge_block_id))
+        } else {
+            Ok(then_end)
+        }
     }
 
     fn lower_while_statement(
@@ -1122,6 +1261,41 @@ impl MirBuilder {
             Some(span),
         )?;
         Ok(result)
+    }
+
+    fn emit_return_to_exit(
+        &mut self,
+        mir_function: &mut MirFunction,
+        block_index: usize,
+        return_value: Option<MirValueId>,
+        span: SourceSpan,
+    ) -> Result<(), MirError> {
+        if let (Some(return_slot), Some(return_value)) =
+            (self.active_return_slot.clone(), return_value)
+        {
+            self.emit_instruction(
+                mir_function,
+                block_index,
+                MirInstructionKind::Store {
+                    name: return_slot,
+                    value: return_value,
+                },
+                None,
+                Some(span),
+            )?;
+        }
+
+        let exit_block = self.active_exit_block.ok_or_else(|| {
+            MirError::LoweringError("return lowered without an active exit block".to_string())
+        })?;
+
+        self.emit_terminator(
+            mir_function,
+            block_index,
+            MirInstructionKind::Jump { target: exit_block },
+            None,
+            Some(span),
+        )
     }
 
     fn emit_instruction(
