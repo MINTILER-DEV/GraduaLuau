@@ -4,28 +4,30 @@
 // for the GraduaLuau compiler. The HIR is a clean, language-independent
 // intermediate representation after semantic analysis.
 
+pub mod builder;
 pub mod error;
-pub mod types;
-pub mod ids;
-pub mod module;
-pub mod statement;
 pub mod expression;
 pub mod function;
-pub mod builder;
-pub mod validator;
+pub mod ids;
+pub mod module;
 pub mod printer;
+pub mod statement;
+pub mod symbol;
+pub mod types;
+pub mod validator;
 
 // Re-export commonly used types for convenience
-pub use error::{HirError};
-pub use types::{HirType, HirUnaryOperator, HirBinaryOperator, HirBuiltinFunction};
-pub use ids::{HirFunctionId, HirVariableId};
-pub use module::{HirModule, HirGlobalVariable};
-pub use statement::{HirStatement, HirStatementKind, HirLocalVariable};
+pub use builder::HirBuilder;
+pub use error::HirError;
 pub use expression::{HirExpression, HirExpressionKind, HirTableField};
 pub use function::{HirFunction, HirParameter};
-pub use builder::HirBuilder;
-pub use validator::{HirValidator, HirValidationError};
+pub use ids::{HirFunctionId, HirScopeId, HirSymbolId, HirVariableId};
+pub use module::{HirGlobalVariable, HirModule};
 pub use printer::HirPrinter;
+pub use statement::{HirLocalVariable, HirStatement, HirStatementKind};
+pub use symbol::{HirScope, HirSymbol, HirSymbolKind};
+pub use types::{HirBinaryOperator, HirBuiltinFunction, HirType, HirUnaryOperator};
+pub use validator::{HirValidationError, HirValidator};
 
 use crate::parser::ast_builder::AstNode;
 
@@ -36,7 +38,7 @@ impl HirStage {
     pub fn lower(ast: &AstNode) -> Result<HirModule, HirError> {
         let mut builder = HirBuilder::new();
         let module = builder.build(ast)?;
-        
+
         // Validate the generated HIR
         let mut validator = HirValidator::new();
         if let Err(validation_errors) = validator.validate(&module) {
@@ -45,7 +47,7 @@ impl HirStage {
                 validation_errors.len()
             )));
         }
-        
+
         Ok(module)
     }
 }

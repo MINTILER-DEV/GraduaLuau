@@ -1,8 +1,8 @@
-use crate::source::SourceSpan;
 use super::expression::HirExpression;
-use super::ids::HirVariableId;
-use super::types::HirType;
 use super::function::HirFunction;
+use super::ids::{HirScopeId, HirSymbolId, HirVariableId};
+use super::types::HirType;
+use crate::source::SourceSpan;
 
 #[derive(Debug, Clone)]
 pub struct HirStatement {
@@ -17,19 +17,19 @@ pub enum HirStatementKind {
         variable: HirLocalVariable,
         initializer: Option<HirExpression>,
     },
-    
+
     // Assignment
     Assignment {
         targets: Vec<HirExpression>,
         values: Vec<HirExpression>,
     },
-    
+
     // Function call
     Expression(HirExpression),
-    
+
     // Return
     Return(Option<Vec<HirExpression>>),
-    
+
     // Control flow
     Block(Vec<HirStatement>),
     If {
@@ -57,16 +57,16 @@ pub enum HirStatementKind {
         iterables: Vec<HirExpression>,
         body: Vec<HirStatement>,
     },
-    
+
     // Loop control
     Break,
     Continue,
-    
+
     // Function definition
     Function {
         function: HirFunction,
     },
-    
+
     // Error recovery
     Error,
 }
@@ -74,7 +74,9 @@ pub enum HirStatementKind {
 #[derive(Debug, Clone)]
 pub struct HirLocalVariable {
     pub id: HirVariableId,
+    pub symbol_id: HirSymbolId,
     pub name: String,
     pub var_type: Option<HirType>,
+    pub scope_id: HirScopeId,
     pub span: SourceSpan,
 }

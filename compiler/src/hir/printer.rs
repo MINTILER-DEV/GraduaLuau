@@ -1,9 +1,9 @@
-use super::module::HirModule;
-use super::module::HirGlobalVariable;
-use super::statement::{HirStatement, HirStatementKind};
-use super::function::HirFunction;
 use super::expression::{HirExpression, HirExpressionKind, HirTableField};
-use super::types::{HirUnaryOperator, HirBinaryOperator};
+use super::function::HirFunction;
+use super::module::HirGlobalVariable;
+use super::module::HirModule;
+use super::statement::{HirStatement, HirStatementKind};
+use super::types::{HirBinaryOperator, HirUnaryOperator};
 
 pub struct HirPrinter {
     indent: usize,
@@ -13,13 +13,47 @@ impl HirPrinter {
     pub fn new() -> Self {
         Self { indent: 0 }
     }
-    
+
     pub fn print_module(&mut self, module: &HirModule) -> String {
         let mut output = String::new();
-        
+
         output.push_str(&format!("Module '{}'\n", module.name));
         self.indent += 2;
-        
+
+        if !module.scopes.is_empty() {
+            output.push_str(&self.indent_str());
+            output.push_str("Scopes:\n");
+            self.indent += 2;
+            for scope in &module.scopes {
+                output.push_str(&self.indent_str());
+                output.push_str(&format!(
+                    "Scope #{} parent={:?} symbols={:?}\n",
+                    scope.id.0,
+                    scope.parent.map(|parent| parent.0),
+                    scope
+                        .symbols
+                        .iter()
+                        .map(|symbol| symbol.0)
+                        .collect::<Vec<_>>()
+                ));
+            }
+            self.indent -= 2;
+        }
+
+        if !module.symbols.is_empty() {
+            output.push_str(&self.indent_str());
+            output.push_str("Symbols:\n");
+            self.indent += 2;
+            for symbol in &module.symbols {
+                output.push_str(&self.indent_str());
+                output.push_str(&format!(
+                    "#{} {:?} '{}' scope=#{} type={:?}\n",
+                    symbol.id.0, symbol.kind, symbol.name, symbol.scope_id.0, symbol.value_type
+                ));
+            }
+            self.indent -= 2;
+        }
+
         // Print global variables
         if !module.global_variables.is_empty() {
             output.push_str(&self.indent_str());
@@ -30,7 +64,7 @@ impl HirPrinter {
             }
             self.indent -= 2;
         }
-        
+
         // Print functions
         if !module.functions.is_empty() {
             output.push_str(&self.indent_str());
@@ -41,16 +75,19 @@ impl HirPrinter {
             }
             self.indent -= 2;
         }
-        
+
         self.indent -= 2;
         output
     }
-    
+
     fn print_global_variable(&mut self, global: &HirGlobalVariable) -> String {
         let mut output = String::new();
         output.push_str(&self.indent_str());
-        output.push_str(&format!("Global Variable: {}\n", global.name));
-        
+        output.push_str(&format!(
+            "Global Variable: {} symbol=#{} scope=#{} type={:?}\n",
+            global.name, global.symbol_id.0, global.scope_id.0, global.var_type
+        ));
+
         if let Some(initializer) = &global.initializer {
             self.indent += 2;
             output.push_str(&self.indent_str());
@@ -59,52 +96,77 @@ impl HirPrinter {
             output.push('\n');
             self.indent -= 2;
         }
-        
+
         output
     }
-    
+
     fn print_function(&mut self, function: &HirFunction) -> String {
         let mut output = String::new();
         output.push_str(&self.indent_str());
-        output.push_str(&format!("Function '{}'", function.name));
-        
+        output.push_str(&format!(
+            "Function '{}' id=#{} symbol=#{} scope=#{}",
+            function.name, function.id.0, function.symbol_id.0, function.scope_id.0
+        ));
+
         if !function.parameters.is_empty() {
             output.push_str("(");
-            let params: Vec<String> = function.parameters.iter()
+            let params: Vec<String> = function
+                .parameters
+                .iter()
                 .map(|p| {
                     if let Some(param_type) = &p.param_type {
-                        format!("{}: {:?}", p.name, param_type)
+                        format!("{}#{}: {:?}", p.name, p.symbol_id.0, param_type)
                     } else {
-                        p.name.clone()
+                        format!("{}#{}", p.name, p.symbol_id.0)
                     }
                 })
                 .collect();
             output.push_str(&params.join(", "));
             output.push(')');
         }
-        
+
         if let Some(return_type) = &function.return_type {
             output.push_str(&format!(" -> {:?}", return_type));
         }
-        
+
         output.push('\n');
-        
+
         self.indent += 2;
+        if !function.local_variables.is_empty() {
+            output.push_str(&self.indent_str());
+            output.push_str("Locals:\n");
+            self.indent += 2;
+            for local in &function.local_variables {
+                output.push_str(&self.indent_str());
+                output.push_str(&format!(
+                    "{} id=#{} symbol=#{} scope=#{} type={:?}\n",
+                    local.name, local.id.0, local.symbol_id.0, local.scope_id.0, local.var_type
+                ));
+            }
+            self.indent -= 2;
+        }
+
         for statement in &function.body {
             output.push_str(&self.print_statement(statement));
         }
         self.indent -= 2;
-        
+
         output
     }
-    
+
     fn print_statement(&mut self, statement: &HirStatement) -> String {
         let mut output = String::new();
         output.push_str(&self.indent_str());
-        
+
         match &statement.kind {
-            HirStatementKind::LocalVariable { variable, initializer } => {
-                output.push_str(&format!("Local Variable: {}", variable.name));
+            HirStatementKind::LocalVariable {
+                variable,
+                initializer,
+            } => {
+                output.push_str(&format!(
+                    "Local Variable: {} id=#{} symbol=#{} type={:?}",
+                    variable.name, variable.id.0, variable.symbol_id.0, variable.var_type
+                ));
                 if let Some(init) = initializer {
                     output.push_str(" = ");
                     output.push_str(&self.print_expression(init));
@@ -113,14 +175,12 @@ impl HirPrinter {
             }
             HirStatementKind::Assignment { targets, values } => {
                 output.push_str("Assignment: ");
-                let target_strs: Vec<String> = targets.iter()
-                    .map(|t| self.print_expression(t))
-                    .collect();
+                let target_strs: Vec<String> =
+                    targets.iter().map(|t| self.print_expression(t)).collect();
                 output.push_str(&target_strs.join(", "));
                 output.push_str(" = ");
-                let value_strs: Vec<String> = values.iter()
-                    .map(|v| self.print_expression(v))
-                    .collect();
+                let value_strs: Vec<String> =
+                    values.iter().map(|v| self.print_expression(v)).collect();
                 output.push_str(&value_strs.join(", "));
                 output.push('\n');
             }
@@ -132,9 +192,8 @@ impl HirPrinter {
                 output.push_str("Return");
                 if let Some(exprs) = exprs {
                     output.push_str(" ");
-                    let expr_strs: Vec<String> = exprs.iter()
-                        .map(|e| self.print_expression(e))
-                        .collect();
+                    let expr_strs: Vec<String> =
+                        exprs.iter().map(|e| self.print_expression(e)).collect();
                     output.push_str(&expr_strs.join(", "));
                 }
                 output.push('\n');
@@ -147,7 +206,11 @@ impl HirPrinter {
                 }
                 self.indent -= 2;
             }
-            HirStatementKind::If { condition, then_block, else_block } => {
+            HirStatementKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
                 output.push_str("If ");
                 output.push_str(&self.print_expression(condition));
                 output.push('\n');
@@ -159,7 +222,7 @@ impl HirPrinter {
                     output.push_str(&self.print_statement(stmt));
                 }
                 self.indent -= 2;
-                
+
                 if let Some(else_block) = else_block {
                     output.push_str(&self.indent_str());
                     output.push_str("Else:\n");
@@ -193,7 +256,13 @@ impl HirPrinter {
                 output.push_str(&self.print_expression(condition));
                 output.push('\n');
             }
-            HirStatementKind::ForNumeric { variable, start, end, step, body } => {
+            HirStatementKind::ForNumeric {
+                variable,
+                start,
+                end,
+                step,
+                body,
+            } => {
                 output.push_str(&format!("For {} = ", variable.name));
                 output.push_str(&self.print_expression(start));
                 output.push_str(" to ");
@@ -209,14 +278,17 @@ impl HirPrinter {
                 }
                 self.indent -= 2;
             }
-            HirStatementKind::ForGeneric { variables, iterables, body } => {
+            HirStatementKind::ForGeneric {
+                variables,
+                iterables,
+                body,
+            } => {
                 output.push_str("For ");
                 let var_names: Vec<String> = variables.iter().map(|v| v.name.clone()).collect();
                 output.push_str(&var_names.join(", "));
                 output.push_str(" in ");
-                let iterable_strs: Vec<String> = iterables.iter()
-                    .map(|i| self.print_expression(i))
-                    .collect();
+                let iterable_strs: Vec<String> =
+                    iterables.iter().map(|i| self.print_expression(i)).collect();
                 output.push_str(&iterable_strs.join(", "));
                 output.push('\n');
                 self.indent += 2;
@@ -238,25 +310,38 @@ impl HirPrinter {
                 output.push_str("<Error>\n");
             }
         }
-        
+
         output
     }
-    
+
     fn print_expression(&mut self, expr: &HirExpression) -> String {
         match &expr.kind {
             HirExpressionKind::Nil => "nil".to_string(),
             HirExpressionKind::Boolean(b) => b.to_string(),
             HirExpressionKind::Number(n) => n.to_string(),
             HirExpressionKind::String(s) => format!("\"{}\"", s),
-            HirExpressionKind::LocalVariable(id) => format!("local_{}", id.0),
-            HirExpressionKind::GlobalVariable(name) => name.clone(),
+            HirExpressionKind::LocalVariable(id) => {
+                format!("local_{}{}", id.0, self.print_expression_metadata(expr))
+            }
+            HirExpressionKind::GlobalVariable(name) => {
+                format!("{}{}", name, self.print_expression_metadata(expr))
+            }
             HirExpressionKind::Unary { operator, operand } => {
                 let op_str = self.print_unary_operator(*operator);
                 format!("{}({})", op_str, self.print_expression(operand))
             }
-            HirExpressionKind::Binary { left, operator, right } => {
+            HirExpressionKind::Binary {
+                left,
+                operator,
+                right,
+            } => {
                 let op_str = self.print_binary_operator(*operator);
-                format!("({} {} {})", self.print_expression(left), op_str, self.print_expression(right))
+                format!(
+                    "({} {} {})",
+                    self.print_expression(left),
+                    op_str,
+                    self.print_expression(right)
+                )
             }
             HirExpressionKind::TableConstructor(fields) => {
                 let mut field_strs = Vec::new();
@@ -266,7 +351,11 @@ impl HirPrinter {
                             field_strs.push(format!("{} = {}", key, self.print_expression(value)));
                         }
                         HirTableField::Indexed { key, value } => {
-                            field_strs.push(format!("[{}] = {}", self.print_expression(key), self.print_expression(value)));
+                            field_strs.push(format!(
+                                "[{}] = {}",
+                                self.print_expression(key),
+                                self.print_expression(value)
+                            ));
                         }
                         HirTableField::Expression(expr) => {
                             field_strs.push(self.print_expression(expr));
@@ -276,34 +365,61 @@ impl HirPrinter {
                 format!("{{{}}}", field_strs.join(", "))
             }
             HirExpressionKind::Index { object, index } => {
-                format!("{}[{}]", self.print_expression(object), self.print_expression(index))
+                format!(
+                    "{}[{}]",
+                    self.print_expression(object),
+                    self.print_expression(index)
+                )
             }
             HirExpressionKind::FieldAccess { object, field } => {
                 format!("{}.{}", self.print_expression(object), field)
             }
             HirExpressionKind::FunctionCall { callee, arguments } => {
-                let arg_strs: Vec<String> = arguments.iter()
-                    .map(|a| self.print_expression(a))
-                    .collect();
+                let arg_strs: Vec<String> =
+                    arguments.iter().map(|a| self.print_expression(a)).collect();
                 format!("{}({})", self.print_expression(callee), arg_strs.join(", "))
             }
-            HirExpressionKind::MethodCall { receiver, method, arguments } => {
-                let arg_strs: Vec<String> = arguments.iter()
-                    .map(|a| self.print_expression(a))
-                    .collect();
-                format!("{}:{}({})", self.print_expression(receiver), method, arg_strs.join(", "))
+            HirExpressionKind::MethodCall {
+                receiver,
+                method,
+                arguments,
+            } => {
+                let arg_strs: Vec<String> =
+                    arguments.iter().map(|a| self.print_expression(a)).collect();
+                format!(
+                    "{}:{}({})",
+                    self.print_expression(receiver),
+                    method,
+                    arg_strs.join(", ")
+                )
             }
             HirExpressionKind::ClosurePlaceholder => "<closure>".to_string(),
-            HirExpressionKind::BuiltinCall { function, arguments } => {
-                let arg_strs: Vec<String> = arguments.iter()
-                    .map(|a| self.print_expression(a))
-                    .collect();
-                format!("<builtin {:?}>({})", function, arg_strs.join(", "))
+            HirExpressionKind::BuiltinCall {
+                function,
+                arguments,
+            } => {
+                let arg_strs: Vec<String> =
+                    arguments.iter().map(|a| self.print_expression(a)).collect();
+                format!(
+                    "<builtin {:?}>({}){}",
+                    function,
+                    arg_strs.join(", "),
+                    self.print_expression_metadata(expr)
+                )
             }
             HirExpressionKind::Error => "<error>".to_string(),
         }
     }
-    
+
+    fn print_expression_metadata(&self, expr: &HirExpression) -> String {
+        match (expr.symbol_id, expr.expr_type.as_ref()) {
+            (Some(symbol_id), Some(expr_type)) => format!("#{}:{:?}", symbol_id.0, expr_type),
+            (Some(symbol_id), None) => format!("#{}", symbol_id.0),
+            (None, Some(expr_type)) => format!(":{:?}", expr_type),
+            (None, None) => String::new(),
+        }
+    }
+
     fn print_unary_operator(&self, op: HirUnaryOperator) -> &'static str {
         match op {
             HirUnaryOperator::Negate => "-",
@@ -312,7 +428,7 @@ impl HirPrinter {
             HirUnaryOperator::BitwiseNot => "~",
         }
     }
-    
+
     fn print_binary_operator(&self, op: HirBinaryOperator) -> &'static str {
         match op {
             HirBinaryOperator::Add => "+",
@@ -338,7 +454,7 @@ impl HirPrinter {
             HirBinaryOperator::BitwiseShiftRight => ">>",
         }
     }
-    
+
     fn indent_str(&self) -> String {
         " ".repeat(self.indent)
     }

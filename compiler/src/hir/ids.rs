@@ -15,3 +15,21 @@ impl HirVariableId {
         Self(id)
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HirSymbolId(pub usize);
+
+impl HirSymbolId {
+    pub fn new(id: usize) -> Self {
+        Self(id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HirScopeId(pub usize);
+
+impl HirScopeId {
+    pub fn new(id: usize) -> Self {
+        Self(id)
+    }
+}

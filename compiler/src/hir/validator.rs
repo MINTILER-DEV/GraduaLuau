@@ -1,79 +1,117 @@
-use crate::source::SourceSpan;
-use super::module::HirModule;
-use super::module::HirGlobalVariable;
-use super::statement::{HirStatement, HirStatementKind};
-use super::function::HirFunction;
+use std::collections::HashSet;
+
 use super::expression::{HirExpression, HirExpressionKind, HirTableField};
+use super::function::HirFunction;
+use super::ids::{HirScopeId, HirSymbolId};
+use super::module::HirGlobalVariable;
+use super::module::HirModule;
+use super::statement::{HirStatement, HirStatementKind};
+use super::types::HirType;
+use crate::source::SourceSpan;
 
 #[derive(Debug, Clone)]
 pub struct HirValidator {
     errors: Vec<HirValidationError>,
+    known_symbols: HashSet<HirSymbolId>,
+    known_scopes: HashSet<HirScopeId>,
+    current_return_type: Option<HirType>,
 }
 
 #[derive(Debug, Clone)]
 pub enum HirValidationError {
-    InvalidControlFlow {
-        message: String,
-        span: SourceSpan,
-    },
-    InvalidExpression {
-        message: String,
-        span: SourceSpan,
-    },
+    InvalidControlFlow { message: String, span: SourceSpan },
+    InvalidExpression { message: String, span: SourceSpan },
 }
 
 impl HirValidator {
     pub fn new() -> Self {
         Self {
             errors: Vec::new(),
+            known_symbols: HashSet::new(),
+            known_scopes: HashSet::new(),
+            current_return_type: None,
         }
     }
-    
+
     pub fn validate(&mut self, module: &HirModule) -> Result<(), Vec<HirValidationError>> {
         self.validate_module(module);
-        
+
         if self.errors.is_empty() {
             Ok(())
         } else {
             Err(self.errors.clone())
         }
     }
-    
+
     fn validate_module(&mut self, module: &HirModule) {
-        // Empty modules are valid (might contain only comments or be empty files)
-        // Skip empty module check for now
-        
-        // Validate all functions
+        self.known_symbols = module.symbols.iter().map(|symbol| symbol.id).collect();
+        self.known_scopes = module.scopes.iter().map(|scope| scope.id).collect();
+
+        if let Some(root_scope) = module.metadata.root_scope {
+            self.validate_scope_id(root_scope, module.span, "module root scope");
+        }
+
+        for scope in &module.scopes {
+            if let Some(parent) = scope.parent {
+                self.validate_scope_id(parent, module.span, "scope parent");
+            }
+            for symbol_id in &scope.symbols {
+                self.validate_symbol_id(*symbol_id, module.span, "scope symbol");
+            }
+        }
+
+        for symbol in &module.symbols {
+            self.validate_scope_id(symbol.scope_id, symbol.span, "symbol scope");
+        }
+
         for function in &module.functions {
             self.validate_function(function);
         }
-        
-        // Validate global variables
+
         for global in &module.global_variables {
             self.validate_global_variable(global);
         }
     }
-    
+
     fn validate_function(&mut self, function: &HirFunction) {
-        // Empty functions are valid in Lua (stubs, forward declarations)
-        // Skip empty function body check for now
-        
-        // Validate function body statements
+        self.validate_symbol_id(function.symbol_id, function.span, "function symbol");
+        self.validate_scope_id(function.scope_id, function.span, "function scope");
+
+        for parameter in &function.parameters {
+            self.validate_symbol_id(parameter.symbol_id, parameter.span, "parameter symbol");
+            self.validate_scope_id(parameter.scope_id, parameter.span, "parameter scope");
+        }
+
+        for variable in &function.local_variables {
+            self.validate_symbol_id(variable.symbol_id, variable.span, "local variable symbol");
+            self.validate_scope_id(variable.scope_id, variable.span, "local variable scope");
+        }
+
+        let previous_return_type = self.current_return_type.clone();
+        self.current_return_type = function.return_type.clone();
         for statement in &function.body {
             self.validate_statement(statement);
         }
+        self.current_return_type = previous_return_type;
     }
-    
+
     fn validate_global_variable(&mut self, global: &HirGlobalVariable) {
-        // Validate initializer if present
+        self.validate_symbol_id(global.symbol_id, global.span, "global variable symbol");
+        self.validate_scope_id(global.scope_id, global.span, "global variable scope");
+
         if let Some(initializer) = &global.initializer {
             self.validate_expression(initializer);
         }
     }
-    
+
     fn validate_statement(&mut self, statement: &HirStatement) {
         match &statement.kind {
-            HirStatementKind::LocalVariable { initializer, variable: _ } => {
+            HirStatementKind::LocalVariable {
+                initializer,
+                variable,
+            } => {
+                self.validate_symbol_id(variable.symbol_id, variable.span, "local variable symbol");
+                self.validate_scope_id(variable.scope_id, variable.span, "local variable scope");
                 if let Some(init) = initializer {
                     self.validate_expression(init);
                 }
@@ -93,10 +131,27 @@ impl HirValidator {
                 if let Some(exprs) = exprs {
                     for expr in exprs {
                         self.validate_expression(expr);
+                        if let (Some(expected), Some(actual)) =
+                            (self.current_return_type.as_ref(), expr.expr_type.as_ref())
+                        {
+                            if !Self::types_compatible(expected, actual) {
+                                self.errors.push(HirValidationError::InvalidExpression {
+                                    message: format!(
+                                        "Return type mismatch: expected {:?}, got {:?}",
+                                        expected, actual
+                                    ),
+                                    span: expr.span,
+                                });
+                            }
+                        }
                     }
                 }
             }
-            HirStatementKind::If { condition, then_block, else_block } => {
+            HirStatementKind::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
                 self.validate_expression(condition);
                 for stmt in then_block {
                     self.validate_statement(stmt);
@@ -119,7 +174,13 @@ impl HirValidator {
                 }
                 self.validate_expression(condition);
             }
-            HirStatementKind::ForNumeric { start, end, step, body, variable: _ } => {
+            HirStatementKind::ForNumeric {
+                start,
+                end,
+                step,
+                body,
+                variable: _,
+            } => {
                 self.validate_expression(start);
                 self.validate_expression(end);
                 if let Some(step) = step {
@@ -129,7 +190,11 @@ impl HirValidator {
                     self.validate_statement(stmt);
                 }
             }
-            HirStatementKind::ForGeneric { iterables, body, variables: _ } => {
+            HirStatementKind::ForGeneric {
+                iterables,
+                body,
+                variables: _,
+            } => {
                 for iterable in iterables {
                     self.validate_expression(iterable);
                 }
@@ -154,13 +219,24 @@ impl HirValidator {
             }
         }
     }
-    
+
     fn validate_expression(&mut self, expression: &HirExpression) {
+        if let Some(symbol_id) = expression.symbol_id {
+            self.validate_symbol_id(symbol_id, expression.span, "expression symbol");
+        }
+
         match &expression.kind {
-            HirExpressionKind::Unary { operand, operator: _ } => {
+            HirExpressionKind::Unary {
+                operand,
+                operator: _,
+            } => {
                 self.validate_expression(operand);
             }
-            HirExpressionKind::Binary { left, right, operator: _ } => {
+            HirExpressionKind::Binary {
+                left,
+                right,
+                operator: _,
+            } => {
                 self.validate_expression(left);
                 self.validate_expression(right);
             }
@@ -193,7 +269,11 @@ impl HirValidator {
                     self.validate_expression(arg);
                 }
             }
-            HirExpressionKind::MethodCall { receiver, arguments, method: _ } => {
+            HirExpressionKind::MethodCall {
+                receiver,
+                arguments,
+                method: _,
+            } => {
                 self.validate_expression(receiver);
                 for arg in arguments {
                     self.validate_expression(arg);
@@ -203,18 +283,33 @@ impl HirValidator {
                 // Closures are stored separately to avoid circular dependencies
                 // Validation would need to be done on the actual function storage
             }
-            HirExpressionKind::BuiltinCall { arguments, function: _ } => {
+            HirExpressionKind::BuiltinCall {
+                arguments,
+                function: _,
+            } => {
                 for arg in arguments {
                     self.validate_expression(arg);
                 }
             }
-            // Literals and variables are always valid
             HirExpressionKind::Nil
             | HirExpressionKind::Boolean(_)
             | HirExpressionKind::Number(_)
             | HirExpressionKind::String(_)
-            | HirExpressionKind::LocalVariable(_)
             | HirExpressionKind::GlobalVariable(_) => {}
+            HirExpressionKind::LocalVariable(_) => {
+                if expression.symbol_id.is_none() {
+                    self.errors.push(HirValidationError::InvalidExpression {
+                        message: "Local variable reference is missing a symbol".to_string(),
+                        span: expression.span,
+                    });
+                }
+                if expression.expr_type.is_none() {
+                    self.errors.push(HirValidationError::InvalidExpression {
+                        message: "Local variable reference is missing a type".to_string(),
+                        span: expression.span,
+                    });
+                }
+            }
             HirExpressionKind::Error => {
                 self.errors.push(HirValidationError::InvalidExpression {
                     message: "Expression contains error".to_string(),
@@ -222,6 +317,30 @@ impl HirValidator {
                 });
             }
         }
+    }
+
+    fn validate_symbol_id(&mut self, symbol_id: HirSymbolId, span: SourceSpan, context: &str) {
+        if !self.known_symbols.contains(&symbol_id) {
+            self.errors.push(HirValidationError::InvalidExpression {
+                message: format!("Invalid {context}: unknown symbol #{}", symbol_id.0),
+                span,
+            });
+        }
+    }
+
+    fn validate_scope_id(&mut self, scope_id: HirScopeId, span: SourceSpan, context: &str) {
+        if !self.known_scopes.contains(&scope_id) {
+            self.errors.push(HirValidationError::InvalidExpression {
+                message: format!("Invalid {context}: unknown scope #{}", scope_id.0),
+                span,
+            });
+        }
+    }
+
+    fn types_compatible(expected: &HirType, actual: &HirType) -> bool {
+        expected == actual
+            || matches!(expected, HirType::Any | HirType::Unknown)
+            || matches!(actual, HirType::Any | HirType::Unknown)
     }
 }
 
