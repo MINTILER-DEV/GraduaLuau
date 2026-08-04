@@ -7,7 +7,9 @@ use compiler::hir::{
 };
 use compiler::lexer::Lexer;
 use compiler::mir::{
-    MirInstructionKind, MirModule, MirPrinter, MirStage, MirTerminator, MirValidator, MirValueKind,
+    MirBasicBlock, MirBuilder, MirFunction, MirFunctionId, MirInstruction, MirInstructionKind,
+    MirModule, MirOptimizer, MirPrinter, MirStage, MirTerminator, MirType as LoweredMirType,
+    MirValidator, MirValue, MirValueData, MirValueId, MirValueKind,
 };
 use compiler::parser::Parser;
 use compiler::semantic;
@@ -656,6 +658,103 @@ fn validator_rejects_cfg_block_edge_mismatches() {
 }
 
 #[test]
+fn validator_rejects_duplicate_value_ids() {
+    let mut mir = raw_copy_module();
+    let duplicate = mir.functions[0].values[0].clone();
+    mir.functions[0].values.push(duplicate);
+
+    let mut validator = MirValidator::new();
+    let errors = validator
+        .validate(&mir)
+        .expect_err("duplicate value IDs should be rejected");
+
+    assert!(
+        errors
+            .iter()
+            .any(|error| format!("{error:?}").contains("duplicate MIR value id"))
+    );
+}
+
+#[test]
+fn mir_optimizer_folds_constants_and_removes_dead_values() {
+    let span = test_span();
+    let result = local_variable(0, 0, "result", HirType::Number, span);
+    let module = manual_module_with_signature(
+        "folds",
+        Vec::new(),
+        vec![result.clone()],
+        vec![
+            local_stmt(
+                result,
+                Some(add_expr(
+                    number_expr(2.0, span),
+                    number_expr(3.0, span),
+                    span,
+                )),
+                span,
+            ),
+            return_stmt(local_expr(0, 0, HirType::Number, span), span),
+        ],
+        HirType::Number,
+    );
+
+    let unoptimized = MirBuilder::new()
+        .build(&module)
+        .expect("manual HIR should build unoptimized MIR");
+    let mut optimizer = MirOptimizer::new();
+    let optimized = optimizer.optimize(&unoptimized);
+    let function = &optimized.module.functions[0];
+
+    assert!(optimized.stats.constants_folded >= 1);
+    assert!(optimized.stats.dead_instructions_removed >= 2);
+    assert!(function.blocks.iter().all(|block| {
+        block
+            .instructions
+            .iter()
+            .all(|instruction| !matches!(instruction.kind, MirInstructionKind::Add { .. }))
+    }));
+    assert!(function.blocks.iter().any(|block| {
+        block.instructions.iter().any(|instruction| {
+            matches!(
+                instruction.kind,
+                MirInstructionKind::Const {
+                    value: MirValue::Integer(5),
+                    ..
+                }
+            )
+        })
+    }));
+}
+
+#[test]
+fn mir_optimizer_propagates_copies() {
+    let mir = raw_copy_module();
+    let mut optimizer = MirOptimizer::new();
+    let optimized = optimizer.optimize(&mir);
+    let function = &optimized.module.functions[0];
+
+    assert_eq!(optimized.stats.copies_propagated, 1);
+    assert!(
+        function.blocks[0]
+            .instructions
+            .iter()
+            .all(|instruction| !matches!(instruction.kind, MirInstructionKind::Move { .. }))
+    );
+    assert!(matches!(
+        function.blocks[0]
+            .instructions
+            .last()
+            .map(|instruction| &instruction.kind),
+        Some(MirInstructionKind::Return {
+            value: Some(MirValueId(0))
+        })
+    ));
+
+    let mut validator = MirValidator::new();
+    assert!(validator.validate(&optimized.module).is_ok());
+}
+
+#[test]
 fn ssa_metadata_collects_defs_uses_and_phi_candidates() {
     let span = test_span();
     let flag = HirParameter {
@@ -944,6 +1043,63 @@ fn function_block_id(function: &HirLoweredMirFunction, index: usize) -> compiler
 }
 
 type HirLoweredMirFunction = compiler::mir::MirFunction;
+
+fn raw_copy_module() -> MirModule {
+    let span = test_span();
+    let mut module = MirModule::new("raw".to_string());
+    let mut function = MirFunction::new(MirFunctionId::new(0), "copies".to_string());
+    function.return_type = Some(LoweredMirType::Integer);
+    function.entry_block = Some(0);
+    function.add_block(MirBasicBlock::with_entry(compiler::mir::MirBlockId::new(0)));
+    function.add_value(MirValueData::new(
+        MirValueId::new(0),
+        LoweredMirType::Integer,
+        MirValueKind::Constant,
+        Some(span),
+    ));
+    function.add_value(MirValueData::new(
+        MirValueId::new(1),
+        LoweredMirType::Integer,
+        MirValueKind::Temporary,
+        Some(span),
+    ));
+    function.add_instruction(
+        0,
+        MirInstruction::new(
+            MirInstructionKind::Const {
+                result: MirValueId::new(0),
+                value: MirValue::Integer(7),
+            },
+            Some(LoweredMirType::Integer),
+            Some(span),
+        ),
+    );
+    function.add_instruction(
+        0,
+        MirInstruction::new(
+            MirInstructionKind::Move {
+                result: MirValueId::new(1),
+                value: MirValueId::new(0),
+            },
+            Some(LoweredMirType::Integer),
+            Some(span),
+        ),
+    );
+    function.add_instruction(
+        0,
+        MirInstruction::new(
+            MirInstructionKind::Return {
+                value: Some(MirValueId::new(1)),
+            },
+            Some(LoweredMirType::Void),
+            Some(span),
+        ),
+    );
+    function.rebuild_cfg();
+    function.exit_blocks = vec![0];
+    module.add_function(function);
+    module
+}
 
 fn manual_module(
     function_name: &str,

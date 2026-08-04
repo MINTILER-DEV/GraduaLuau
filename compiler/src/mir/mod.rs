@@ -13,6 +13,7 @@ pub mod instruction;
 pub mod lifetime;
 pub mod module;
 pub mod operand;
+pub mod optimizer;
 pub mod printer;
 pub mod ssa;
 pub mod types;
@@ -33,6 +34,7 @@ pub use lifetime::{
 };
 pub use module::MirModule;
 pub use operand::MirOperand;
+pub use optimizer::{MirOptimizationResult, MirOptimizationStats, MirOptimizer};
 pub use printer::MirPrinter;
 pub use ssa::{
     MirDefinitionKind, MirPhiCandidate, MirProgramPoint, MirSsaMetadata, MirSsaPreparation,
@@ -52,11 +54,23 @@ impl MirStage {
         let mut builder = MirBuilder::new();
         let mut mir_module = builder.build(hir)?;
 
-        // Validate the generated MIR
+        // Validate the generated MIR before optimization.
         let mut validator = MirValidator::new();
         if let Err(validation_errors) = validator.validate(&mir_module) {
             return Err(MirError::ValidationError(format!(
                 "MIR validation failed with {} errors: {:?}",
+                validation_errors.len(),
+                validation_errors
+            )));
+        }
+
+        let mut optimizer = MirOptimizer::new();
+        mir_module = optimizer.optimize(&mir_module).module;
+
+        let mut validator = MirValidator::new();
+        if let Err(validation_errors) = validator.validate(&mir_module) {
+            return Err(MirError::ValidationError(format!(
+                "optimized MIR validation failed with {} errors: {:?}",
                 validation_errors.len(),
                 validation_errors
             )));
