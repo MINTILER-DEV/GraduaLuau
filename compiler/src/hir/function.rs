@@ -1,7 +1,7 @@
 use super::ids::{HirFunctionId, HirScopeId, HirSymbolId, HirVariableId};
 use super::statement::HirLocalVariable;
 use super::statement::HirStatement;
-use super::types::HirType;
+use super::types::{HirFunctionSignature, HirType};
 use crate::source::SourceSpan;
 
 #[derive(Debug, Clone)]
@@ -13,6 +13,7 @@ pub struct HirFunction {
     pub local_variables: Vec<HirLocalVariable>,
     pub body: Vec<HirStatement>,
     pub return_type: Option<HirType>,
+    pub signature: HirFunctionSignature,
     pub scope_id: HirScopeId,
     pub is_local: bool,
     pub metadata: HirFunctionMetadata,

@@ -1,7 +1,7 @@
 use crate::source::SourceSpan;
 
 use super::ids::{HirScopeId, HirSymbolId};
-use super::types::HirType;
+use super::types::{HirFunctionSignature, HirType};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HirSymbolKind {
@@ -23,6 +23,7 @@ pub struct HirSymbol {
     pub kind: HirSymbolKind,
     pub scope_id: HirScopeId,
     pub value_type: Option<HirType>,
+    pub function_signature: Option<HirFunctionSignature>,
     pub span: SourceSpan,
 }
 
@@ -33,6 +34,7 @@ impl HirSymbol {
         kind: HirSymbolKind,
         scope_id: HirScopeId,
         value_type: Option<HirType>,
+        function_signature: Option<HirFunctionSignature>,
         span: SourceSpan,
     ) -> Self {
         Self {
@@ -41,6 +43,7 @@ impl HirSymbol {
             kind,
             scope_id,
             value_type,
+            function_signature,
             span,
         }
     }

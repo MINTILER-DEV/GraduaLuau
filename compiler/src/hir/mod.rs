@@ -26,7 +26,10 @@ pub use module::{HirGlobalVariable, HirModule, HirTypeAlias};
 pub use printer::HirPrinter;
 pub use statement::{HirLocalVariable, HirStatement, HirStatementKind};
 pub use symbol::{HirScope, HirSymbol, HirSymbolKind};
-pub use types::{HirBinaryOperator, HirBuiltinFunction, HirType, HirUnaryOperator};
+pub use types::{
+    HirBinaryOperator, HirBuiltinFunction, HirCallingConvention, HirFunctionSignature, HirType,
+    HirUnaryOperator,
+};
 pub use validator::{HirValidationError, HirValidator};
 
 use crate::parser::ast_builder::AstNode;

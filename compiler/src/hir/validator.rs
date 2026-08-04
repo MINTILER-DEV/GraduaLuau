@@ -85,11 +85,30 @@ impl HirValidator {
         for parameter in &function.parameters {
             self.validate_symbol_id(parameter.symbol_id, parameter.span, "parameter symbol");
             self.validate_scope_id(parameter.scope_id, parameter.span, "parameter scope");
+            if parameter.param_type.is_none() {
+                self.errors.push(HirValidationError::InvalidExpression {
+                    message: format!("Parameter '{}' is missing a type", parameter.name),
+                    span: parameter.span,
+                });
+            }
         }
 
         for variable in &function.local_variables {
             self.validate_symbol_id(variable.symbol_id, variable.span, "local variable symbol");
             self.validate_scope_id(variable.scope_id, variable.span, "local variable scope");
+            if variable.var_type.is_none() {
+                self.errors.push(HirValidationError::InvalidExpression {
+                    message: format!("Local variable '{}' is missing a type", variable.name),
+                    span: variable.span,
+                });
+            }
+        }
+
+        if function.return_type.is_none() {
+            self.errors.push(HirValidationError::InvalidExpression {
+                message: format!("Function '{}' is missing a return type", function.name),
+                span: function.span,
+            });
         }
 
         let previous_return_type = self.current_return_type.clone();
@@ -122,8 +141,27 @@ impl HirValidator {
             } => {
                 self.validate_symbol_id(variable.symbol_id, variable.span, "local variable symbol");
                 self.validate_scope_id(variable.scope_id, variable.span, "local variable scope");
+                if variable.var_type.is_none() {
+                    self.errors.push(HirValidationError::InvalidExpression {
+                        message: format!("Local variable '{}' is missing a type", variable.name),
+                        span: variable.span,
+                    });
+                }
                 if let Some(init) = initializer {
                     self.validate_expression(init);
+                    if let (Some(expected), Some(actual)) =
+                        (variable.var_type.as_ref(), init.expr_type.as_ref())
+                    {
+                        if !Self::types_compatible(expected, actual) {
+                            self.errors.push(HirValidationError::InvalidExpression {
+                                message: format!(
+                                    "Variable type mismatch: expected {:?}, got {:?}",
+                                    expected, actual
+                                ),
+                                span: init.span,
+                            });
+                        }
+                    }
                 }
             }
             HirStatementKind::Assignment { targets, values } => {
@@ -132,6 +170,21 @@ impl HirValidator {
                 }
                 for value in values {
                     self.validate_expression(value);
+                }
+                for (target, value) in targets.iter().zip(values.iter()) {
+                    if let (Some(expected), Some(actual)) =
+                        (target.expr_type.as_ref(), value.expr_type.as_ref())
+                    {
+                        if !Self::types_compatible(expected, actual) {
+                            self.errors.push(HirValidationError::InvalidExpression {
+                                message: format!(
+                                    "Assignment type mismatch: expected {:?}, got {:?}",
+                                    expected, actual
+                                ),
+                                span: value.span,
+                            });
+                        }
+                    }
                 }
             }
             HirStatementKind::Expression(expr) => {
@@ -235,6 +288,13 @@ impl HirValidator {
             self.validate_symbol_id(symbol_id, expression.span, "expression symbol");
         }
 
+        if !matches!(expression.kind, HirExpressionKind::Error) && expression.expr_type.is_none() {
+            self.errors.push(HirValidationError::InvalidExpression {
+                message: "Expression is missing a type".to_string(),
+                span: expression.span,
+            });
+        }
+
         match &expression.kind {
             HirExpressionKind::Unary {
                 operand,
@@ -327,12 +387,6 @@ impl HirValidator {
                         span: expression.span,
                     });
                 }
-                if expression.expr_type.is_none() {
-                    self.errors.push(HirValidationError::InvalidExpression {
-                        message: "Local variable reference is missing a type".to_string(),
-                        span: expression.span,
-                    });
-                }
             }
             HirExpressionKind::Error => {
                 self.errors.push(HirValidationError::InvalidExpression {
@@ -365,6 +419,7 @@ impl HirValidator {
         expected == actual
             || matches!(expected, HirType::Any | HirType::Unknown)
             || matches!(actual, HirType::Any | HirType::Unknown)
+            || matches!((expected, actual), (HirType::Number, HirType::Integer))
     }
 }
 

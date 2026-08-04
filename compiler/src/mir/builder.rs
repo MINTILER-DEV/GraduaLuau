@@ -520,12 +520,14 @@ impl MirBuilder {
 
     fn lower_hir_type(&self, hir_type: &HirType) -> MirType {
         match hir_type {
-            HirType::Nil => MirType::Any,
+            HirType::Nil => MirType::Void,
             HirType::Boolean => MirType::Boolean,
+            HirType::Integer => MirType::Integer,
             HirType::Number => MirType::Integer,
             HirType::String => MirType::String,
             HirType::Table => MirType::Table,
             HirType::Function => MirType::Function,
+            HirType::Thread | HirType::Userdata => MirType::Any,
             HirType::Any => MirType::Any,
             HirType::Unknown => MirType::Unknown,
         }

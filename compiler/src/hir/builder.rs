@@ -12,7 +12,10 @@ use super::ids::{HirFunctionId, HirScopeId, HirSymbolId, HirVariableId};
 use super::module::{HirModule, HirTypeAlias};
 use super::statement::{HirLocalVariable, HirStatement, HirStatementKind};
 use super::symbol::{HirScope, HirSymbol, HirSymbolKind};
-use super::types::{HirBinaryOperator, HirBuiltinFunction, HirType, HirUnaryOperator};
+use super::types::{
+    HirBinaryOperator, HirBuiltinFunction, HirCallingConvention, HirFunctionSignature, HirType,
+    HirUnaryOperator,
+};
 
 #[derive(Debug, Clone)]
 struct HirBinding {
@@ -20,6 +23,7 @@ struct HirBinding {
     variable_id: Option<HirVariableId>,
     kind: HirSymbolKind,
     value_type: Option<HirType>,
+    function_signature: Option<HirFunctionSignature>,
 }
 
 pub struct HirBuilder {
@@ -83,6 +87,12 @@ impl HirBuilder {
                 "main".to_string(),
                 HirSymbolKind::Function,
                 None,
+                Some(Self::make_function_signature(
+                    Vec::new(),
+                    HirType::Nil,
+                    HirCallingConvention::GraduaLuau,
+                    false,
+                )),
                 program.span,
             );
             let entry_function = HirFunction {
@@ -92,7 +102,13 @@ impl HirBuilder {
                 parameters: Vec::new(),
                 local_variables: Self::collect_local_variables(&entry_statements),
                 body: entry_statements,
-                return_type: None,
+                return_type: Some(HirType::Nil),
+                signature: Self::make_function_signature(
+                    Vec::new(),
+                    HirType::Nil,
+                    HirCallingConvention::GraduaLuau,
+                    false,
+                ),
                 scope_id: self.current_scope_id(),
                 is_local: false,
                 metadata: HirFunctionMetadata {
@@ -160,12 +176,15 @@ impl HirBuilder {
             "print", "type", "tonumber", "tostring", "error", "pairs", "ipairs", "require",
         ] {
             if self.resolve_current_binding(name).is_none() {
-                self.declare_symbol(
-                    name.to_string(),
-                    HirSymbolKind::BuiltinFunction,
-                    Some(HirType::Function),
-                    span,
-                );
+                if let Some(builtin) = self.recognize_builtin(name) {
+                    self.declare_symbol(
+                        name.to_string(),
+                        HirSymbolKind::BuiltinFunction,
+                        Some(HirType::Function),
+                        Some(self.builtin_signature(&builtin)),
+                        span,
+                    );
+                }
             }
         }
     }
@@ -174,10 +193,12 @@ impl HirBuilder {
         for statement in statements {
             match &statement.kind {
                 crate::parser::ast_builder::StatementKind::Function { name, .. } => {
+                    let signature = self.ast_function_signature(statement);
                     self.declare_symbol(
                         name.clone(),
                         HirSymbolKind::Function,
                         Some(HirType::Function),
+                        Some(signature),
                         statement.span,
                     );
                 }
@@ -186,6 +207,7 @@ impl HirBuilder {
                         name.clone(),
                         HirSymbolKind::Type,
                         Some(HirType::Unknown),
+                        None,
                         statement.span,
                     );
                 }
@@ -209,6 +231,7 @@ impl HirBuilder {
                 name.to_string(),
                 HirSymbolKind::Type,
                 Some(alias_type.clone()),
+                None,
                 span,
             )
         };
@@ -232,7 +255,7 @@ impl HirBuilder {
         is_local: bool,
         span: SourceSpan,
     ) -> Result<HirFunction, HirError> {
-        let return_type = return_type.as_ref().map(|typ| self.lower_type(typ));
+        let declared_return_type = return_type.as_ref().map(|typ| self.lower_type(typ));
         let function_symbol = if let Some(binding) = self.resolve_current_binding(name) {
             binding.symbol_id
         } else {
@@ -240,6 +263,12 @@ impl HirBuilder {
                 name.to_string(),
                 HirSymbolKind::Function,
                 Some(HirType::Function),
+                Some(Self::make_function_signature(
+                    Vec::new(),
+                    declared_return_type.clone().unwrap_or(HirType::Unknown),
+                    HirCallingConvention::GraduaLuau,
+                    false,
+                )),
                 span,
             )
         };
@@ -247,20 +276,23 @@ impl HirBuilder {
 
         let mut parameters = Vec::new();
         for (param_name, param_type) in params {
-            let param_type = param_type.as_ref().map(|typ| self.lower_type(typ));
+            let param_type = param_type
+                .as_ref()
+                .map(|typ| self.lower_type(typ))
+                .unwrap_or(HirType::Unknown);
             let variable_id = self.next_variable_id();
             let symbol_id = self.declare_variable_symbol(
                 param_name.clone(),
                 variable_id,
                 HirSymbolKind::Parameter,
-                param_type.clone(),
+                Some(param_type.clone()),
                 span,
             );
             parameters.push(HirParameter {
                 id: variable_id,
                 symbol_id,
                 name: param_name.clone(),
-                param_type,
+                param_type: Some(param_type),
                 scope_id: function_scope,
                 span,
             });
@@ -275,6 +307,19 @@ impl HirBuilder {
 
         self.exit_scope();
         let has_explicit_return = function_body.iter().any(Self::statement_contains_return);
+        let resolved_return_type = declared_return_type
+            .clone()
+            .unwrap_or_else(|| Self::infer_return_type(&function_body));
+        let signature = Self::make_function_signature(
+            parameters
+                .iter()
+                .map(|parameter| parameter.param_type.clone().unwrap_or(HirType::Unknown))
+                .collect(),
+            resolved_return_type.clone(),
+            HirCallingConvention::GraduaLuau,
+            false,
+        );
+        self.update_symbol_signature(function_symbol, Some(signature.clone()));
         let local_variables = Self::collect_local_variables(&function_body);
 
         Ok(HirFunction {
@@ -284,7 +329,8 @@ impl HirBuilder {
             parameters,
             local_variables,
             body: function_body,
-            return_type,
+            return_type: Some(resolved_return_type),
+            signature,
             scope_id: function_scope,
             is_local,
             metadata: HirFunctionMetadata {
@@ -323,14 +369,28 @@ impl HirBuilder {
                 values,
                 operator: _,
             } => {
-                let lowered_targets = targets
+                let lowered_targets: Vec<_> = targets
                     .iter()
                     .map(|expr| self.lower_expression(expr))
                     .collect();
-                let lowered_values = values
+                let lowered_values: Vec<_> = values
                     .iter()
                     .map(|expr| self.lower_expression(expr))
                     .collect();
+                for (target, value) in lowered_targets.iter().zip(lowered_values.iter()) {
+                    if let (Some(expected), Some(actual)) =
+                        (target.expr_type.as_ref(), value.expr_type.as_ref())
+                    {
+                        self.check_type_compatibility(
+                            expected,
+                            actual,
+                            stmt.span,
+                            &format!(
+                                "Cannot assign value of type '{actual}' to target of type '{expected}'"
+                            ),
+                        );
+                    }
+                }
                 HirStatementKind::Assignment {
                     targets: lowered_targets,
                     values: lowered_values,
@@ -381,22 +441,34 @@ impl HirBuilder {
         for (index, (name, annotation)) in names.iter().enumerate() {
             let initializer = lowered_initializers.get(index).cloned();
             let declared_type = annotation.as_ref().map(|typ| self.lower_type(typ));
+            let initializer_type = initializer.as_ref().and_then(|expr| expr.expr_type.clone());
+            if let (Some(expected), Some(actual)) =
+                (declared_type.as_ref(), initializer_type.as_ref())
+            {
+                self.check_type_compatibility(
+                    expected,
+                    actual,
+                    span,
+                    &format!("Cannot assign value of type '{actual}' to variable '{name}'"),
+                );
+            }
             let inferred_type = declared_type
                 .clone()
-                .or_else(|| initializer.as_ref().and_then(|expr| expr.expr_type.clone()));
+                .or(initializer_type)
+                .unwrap_or(HirType::Unknown);
             let variable_id = self.next_variable_id();
             let symbol_id = self.declare_variable_symbol(
                 name.clone(),
                 variable_id,
                 HirSymbolKind::Local,
-                inferred_type.clone(),
+                Some(inferred_type.clone()),
                 span,
             );
             let variable = HirLocalVariable {
                 id: variable_id,
                 symbol_id,
                 name: name.clone(),
-                var_type: inferred_type,
+                var_type: Some(inferred_type),
                 scope_id: self.current_scope_id(),
                 span,
             };
@@ -449,14 +521,14 @@ impl HirBuilder {
                 ));
                 self.expression(
                     HirExpressionKind::GlobalVariable(name.clone()),
-                    None,
+                    Some(HirType::Unknown),
                     None,
                     expr.span,
                 )
             }
             crate::parser::ast_builder::ExpressionKind::NumberLiteral(number) => self.expression(
                 HirExpressionKind::Number(number.parse().unwrap_or(0.0)),
-                Some(HirType::Number),
+                Some(Self::number_literal_type(number)),
                 None,
                 expr.span,
             ),
@@ -518,7 +590,7 @@ impl HirBuilder {
                 let lowered_args = arguments
                     .iter()
                     .map(|argument| self.lower_expression(argument))
-                    .collect();
+                    .collect::<Vec<_>>();
 
                 if let HirExpressionKind::GlobalVariable(name) = &lowered_callee.kind {
                     if let Some(builtin) = self.recognize_builtin(name).filter(|_| {
@@ -526,25 +598,40 @@ impl HirBuilder {
                             .symbol_id
                             .is_some_and(|symbol_id| self.is_builtin_symbol(symbol_id))
                     }) {
+                        self.check_call_arguments(
+                            &self.builtin_signature(&builtin),
+                            &lowered_args,
+                            expr.span,
+                            name,
+                        );
                         let expr_type = self.builtin_result_type(&builtin);
                         return self.expression(
                             HirExpressionKind::BuiltinCall {
                                 function: builtin,
                                 arguments: lowered_args,
                             },
-                            expr_type,
+                            Some(expr_type),
                             lowered_callee.symbol_id,
                             expr.span,
                         );
                     }
                 }
 
+                let expr_type = lowered_callee
+                    .symbol_id
+                    .and_then(|symbol_id| self.symbol_function_signature(symbol_id))
+                    .map(|signature| {
+                        self.check_call_arguments(&signature, &lowered_args, expr.span, "function");
+                        signature.return_type
+                    })
+                    .unwrap_or(HirType::Unknown);
+
                 self.expression(
                     HirExpressionKind::FunctionCall {
                         callee: Box::new(lowered_callee),
                         arguments: lowered_args,
                     },
-                    None,
+                    Some(expr_type),
                     None,
                     expr.span,
                 )
@@ -568,7 +655,7 @@ impl HirBuilder {
                         object: Box::new(object),
                         field: property.clone(),
                     },
-                    None,
+                    Some(HirType::Unknown),
                     None,
                     expr.span,
                 )
@@ -581,7 +668,7 @@ impl HirBuilder {
                         object: Box::new(object),
                         index: Box::new(index),
                     },
-                    None,
+                    Some(HirType::Unknown),
                     None,
                     expr.span,
                 )
@@ -602,7 +689,7 @@ impl HirBuilder {
                         method: method.clone(),
                         arguments,
                     },
-                    None,
+                    Some(HirType::Unknown),
                     None,
                     expr.span,
                 )
@@ -626,9 +713,12 @@ impl HirBuilder {
                     expr.span,
                 )
             }
-            crate::parser::ast_builder::ExpressionKind::Error => {
-                self.expression(HirExpressionKind::Error, None, None, expr.span)
-            }
+            crate::parser::ast_builder::ExpressionKind::Error => self.expression(
+                HirExpressionKind::Error,
+                Some(HirType::Unknown),
+                None,
+                expr.span,
+            ),
         }
     }
 
@@ -695,6 +785,7 @@ impl HirBuilder {
         name: String,
         kind: HirSymbolKind,
         value_type: Option<HirType>,
+        function_signature: Option<HirFunctionSignature>,
         span: SourceSpan,
     ) -> HirSymbolId {
         if let Some(existing) = self.resolve_current_binding(&name) {
@@ -717,6 +808,7 @@ impl HirBuilder {
             kind.clone(),
             scope_id,
             value_type.clone(),
+            function_signature.clone(),
             span,
         ));
 
@@ -734,6 +826,7 @@ impl HirBuilder {
                     variable_id: None,
                     kind,
                     value_type,
+                    function_signature,
                 },
             );
         symbol_id
@@ -747,7 +840,8 @@ impl HirBuilder {
         value_type: Option<HirType>,
         span: SourceSpan,
     ) -> HirSymbolId {
-        let symbol_id = self.declare_symbol(name.clone(), kind.clone(), value_type.clone(), span);
+        let symbol_id =
+            self.declare_symbol(name.clone(), kind.clone(), value_type.clone(), None, span);
         self.bindings
             .last_mut()
             .expect("HIR builder must always have a scope")
@@ -758,6 +852,7 @@ impl HirBuilder {
                     variable_id: Some(variable_id),
                     kind: kind.clone(),
                     value_type,
+                    function_signature: None,
                 },
             );
         symbol_id
@@ -792,6 +887,35 @@ impl HirBuilder {
                 }
             }
         }
+    }
+
+    fn update_symbol_signature(
+        &mut self,
+        symbol_id: HirSymbolId,
+        function_signature: Option<HirFunctionSignature>,
+    ) {
+        if let Some(symbol) = self
+            .symbols
+            .iter_mut()
+            .find(|symbol| symbol.id == symbol_id)
+        {
+            symbol.function_signature = function_signature.clone();
+        }
+
+        for scope in &mut self.bindings {
+            for binding in scope.values_mut() {
+                if binding.symbol_id == symbol_id {
+                    binding.function_signature = function_signature.clone();
+                }
+            }
+        }
+    }
+
+    fn symbol_function_signature(&self, symbol_id: HirSymbolId) -> Option<HirFunctionSignature> {
+        self.symbols
+            .iter()
+            .find(|symbol| symbol.id == symbol_id)
+            .and_then(|symbol| symbol.function_signature.clone())
     }
 
     fn is_builtin_symbol(&self, symbol_id: HirSymbolId) -> bool {
@@ -908,15 +1032,18 @@ impl HirBuilder {
         }
     }
 
-    fn lower_type(&self, type_expr: &crate::parser::ast_builder::TypeExpression) -> HirType {
+    fn lower_type(&mut self, type_expr: &crate::parser::ast_builder::TypeExpression) -> HirType {
         match &type_expr.kind {
             crate::parser::ast_builder::TypeExpressionKind::Named(name) => match name.as_str() {
                 "nil" => HirType::Nil,
                 "boolean" => HirType::Boolean,
+                "integer" => HirType::Integer,
                 "number" => HirType::Number,
                 "string" => HirType::String,
                 "table" => HirType::Table,
                 "function" => HirType::Function,
+                "thread" => HirType::Thread,
+                "userdata" => HirType::Userdata,
                 "any" => HirType::Any,
                 _ => self
                     .resolve_binding(name)
@@ -927,7 +1054,15 @@ impl HirBuilder {
                             None
                         }
                     })
-                    .unwrap_or(HirType::Unknown),
+                    .unwrap_or_else(|| {
+                        self.errors.push(format!(
+                            "Unknown type '{}' at {}..{}",
+                            name,
+                            type_expr.span.start(),
+                            type_expr.span.end()
+                        ));
+                        HirType::Unknown
+                    }),
             },
             crate::parser::ast_builder::TypeExpressionKind::Optional(inner)
             | crate::parser::ast_builder::TypeExpressionKind::Variadic(inner)
@@ -954,16 +1089,133 @@ impl HirBuilder {
         }
     }
 
+    fn ast_function_signature(
+        &mut self,
+        statement: &crate::parser::ast_builder::Statement,
+    ) -> HirFunctionSignature {
+        if let crate::parser::ast_builder::StatementKind::Function {
+            params,
+            return_type,
+            ..
+        } = &statement.kind
+        {
+            let parameter_types = params
+                .iter()
+                .map(|(_, annotation)| {
+                    annotation
+                        .as_ref()
+                        .map(|typ| self.lower_type(typ))
+                        .unwrap_or(HirType::Unknown)
+                })
+                .collect();
+            let return_type = return_type
+                .as_ref()
+                .map(|typ| self.lower_type(typ))
+                .unwrap_or(HirType::Unknown);
+
+            return Self::make_function_signature(
+                parameter_types,
+                return_type,
+                HirCallingConvention::GraduaLuau,
+                false,
+            );
+        }
+
+        Self::make_function_signature(
+            Vec::new(),
+            HirType::Unknown,
+            HirCallingConvention::GraduaLuau,
+            false,
+        )
+    }
+
+    fn make_function_signature(
+        parameter_types: Vec<HirType>,
+        return_type: HirType,
+        calling_convention: HirCallingConvention,
+        is_variadic: bool,
+    ) -> HirFunctionSignature {
+        HirFunctionSignature {
+            parameter_types,
+            return_type,
+            calling_convention,
+            is_variadic,
+        }
+    }
+
+    fn infer_return_type(statements: &[HirStatement]) -> HirType {
+        let mut inferred = None;
+        Self::collect_return_types(statements, &mut inferred);
+        inferred.unwrap_or(HirType::Nil)
+    }
+
+    fn collect_return_types(statements: &[HirStatement], inferred: &mut Option<HirType>) {
+        for statement in statements {
+            match &statement.kind {
+                HirStatementKind::Return(Some(values)) => {
+                    let return_type = values
+                        .first()
+                        .and_then(|value| value.expr_type.clone())
+                        .unwrap_or(HirType::Nil);
+                    match inferred {
+                        Some(existing) if !Self::types_compatible(existing, &return_type) => {
+                            *inferred = Some(HirType::Unknown);
+                        }
+                        Some(_) => {}
+                        None => *inferred = Some(return_type),
+                    }
+                }
+                HirStatementKind::Return(None) => match inferred {
+                    Some(existing) if !Self::types_compatible(existing, &HirType::Nil) => {
+                        *inferred = Some(HirType::Unknown);
+                    }
+                    Some(_) => {}
+                    None => *inferred = Some(HirType::Nil),
+                },
+                HirStatementKind::Block(statements)
+                | HirStatementKind::While {
+                    body: statements, ..
+                }
+                | HirStatementKind::RepeatUntil {
+                    body: statements, ..
+                }
+                | HirStatementKind::ForNumeric {
+                    body: statements, ..
+                }
+                | HirStatementKind::ForGeneric {
+                    body: statements, ..
+                } => Self::collect_return_types(statements, inferred),
+                HirStatementKind::If {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    Self::collect_return_types(then_block, inferred);
+                    if let Some(else_block) = else_block {
+                        Self::collect_return_types(else_block, inferred);
+                    }
+                }
+                HirStatementKind::Function { .. }
+                | HirStatementKind::LocalVariable { .. }
+                | HirStatementKind::Assignment { .. }
+                | HirStatementKind::Expression(_)
+                | HirStatementKind::Break
+                | HirStatementKind::Continue
+                | HirStatementKind::Error => {}
+            }
+        }
+    }
+
     fn unary_result_type(
         &self,
         operator: HirUnaryOperator,
         operand_type: Option<&HirType>,
     ) -> Option<HirType> {
         match operator {
-            HirUnaryOperator::Negate => operand_type.cloned().or(Some(HirType::Number)),
+            HirUnaryOperator::Negate => operand_type.cloned().or(Some(HirType::Integer)),
             HirUnaryOperator::Not => Some(HirType::Boolean),
-            HirUnaryOperator::Length => Some(HirType::Number),
-            HirUnaryOperator::BitwiseNot => Some(HirType::Number),
+            HirUnaryOperator::Length => Some(HirType::Integer),
+            HirUnaryOperator::BitwiseNot => Some(HirType::Integer),
         }
     }
 
@@ -978,14 +1230,14 @@ impl HirBuilder {
             | HirBinaryOperator::Subtract
             | HirBinaryOperator::Multiply
             | HirBinaryOperator::Divide
-            | HirBinaryOperator::FloorDivide
             | HirBinaryOperator::Modulo
-            | HirBinaryOperator::Exponent
+            | HirBinaryOperator::Exponent => Some(Self::numeric_result_type(left_type, right_type)),
+            HirBinaryOperator::FloorDivide
             | HirBinaryOperator::BitwiseAnd
             | HirBinaryOperator::BitwiseOr
             | HirBinaryOperator::BitwiseXor
             | HirBinaryOperator::BitwiseShiftLeft
-            | HirBinaryOperator::BitwiseShiftRight => Some(HirType::Number),
+            | HirBinaryOperator::BitwiseShiftRight => Some(HirType::Integer),
             HirBinaryOperator::Equal
             | HirBinaryOperator::NotEqual
             | HirBinaryOperator::LessThan
@@ -1006,15 +1258,137 @@ impl HirBuilder {
         }
     }
 
-    fn builtin_result_type(&self, function: &HirBuiltinFunction) -> Option<HirType> {
-        match function {
-            HirBuiltinFunction::Print | HirBuiltinFunction::Error | HirBuiltinFunction::Require => {
-                None
-            }
-            HirBuiltinFunction::Type | HirBuiltinFunction::ToString => Some(HirType::String),
-            HirBuiltinFunction::ToNumber => Some(HirType::Number),
-            HirBuiltinFunction::Pairs | HirBuiltinFunction::Ipairs => Some(HirType::Function),
+    fn number_literal_type(text: &str) -> HirType {
+        if text.contains('.') || text.contains('e') || text.contains('E') {
+            HirType::Number
+        } else {
+            HirType::Integer
         }
+    }
+
+    fn numeric_result_type(left_type: Option<&HirType>, right_type: Option<&HirType>) -> HirType {
+        if matches!(left_type, Some(HirType::Number)) || matches!(right_type, Some(HirType::Number))
+        {
+            HirType::Number
+        } else {
+            HirType::Integer
+        }
+    }
+
+    fn builtin_result_type(&self, function: &HirBuiltinFunction) -> HirType {
+        match function {
+            HirBuiltinFunction::Print | HirBuiltinFunction::Error => HirType::Nil,
+            HirBuiltinFunction::Require => HirType::Any,
+            HirBuiltinFunction::Type | HirBuiltinFunction::ToString => HirType::String,
+            HirBuiltinFunction::ToNumber => HirType::Number,
+            HirBuiltinFunction::Pairs | HirBuiltinFunction::Ipairs => HirType::Function,
+        }
+    }
+
+    fn builtin_signature(&self, function: &HirBuiltinFunction) -> HirFunctionSignature {
+        match function {
+            HirBuiltinFunction::Print => Self::make_function_signature(
+                vec![HirType::Any],
+                HirType::Nil,
+                HirCallingConvention::Builtin,
+                true,
+            ),
+            HirBuiltinFunction::Type | HirBuiltinFunction::ToString => {
+                Self::make_function_signature(
+                    vec![HirType::Any],
+                    HirType::String,
+                    HirCallingConvention::Builtin,
+                    false,
+                )
+            }
+            HirBuiltinFunction::ToNumber => Self::make_function_signature(
+                vec![HirType::Any],
+                HirType::Number,
+                HirCallingConvention::Builtin,
+                false,
+            ),
+            HirBuiltinFunction::Error => Self::make_function_signature(
+                vec![HirType::Any],
+                HirType::Nil,
+                HirCallingConvention::Builtin,
+                false,
+            ),
+            HirBuiltinFunction::Pairs | HirBuiltinFunction::Ipairs => {
+                Self::make_function_signature(
+                    vec![HirType::Table],
+                    HirType::Function,
+                    HirCallingConvention::Builtin,
+                    false,
+                )
+            }
+            HirBuiltinFunction::Require => Self::make_function_signature(
+                vec![HirType::String],
+                HirType::Any,
+                HirCallingConvention::Builtin,
+                false,
+            ),
+        }
+    }
+
+    fn check_call_arguments(
+        &mut self,
+        signature: &HirFunctionSignature,
+        arguments: &[HirExpression],
+        span: SourceSpan,
+        function_name: &str,
+    ) {
+        if !signature.is_variadic && arguments.len() != signature.parameter_types.len() {
+            self.errors.push(format!(
+                "Invalid argument count for '{}': expected {}, got {} at {}..{}",
+                function_name,
+                signature.parameter_types.len(),
+                arguments.len(),
+                span.start(),
+                span.end()
+            ));
+        }
+
+        for (index, (expected, argument)) in signature
+            .parameter_types
+            .iter()
+            .zip(arguments.iter())
+            .enumerate()
+        {
+            if let Some(actual) = argument.expr_type.as_ref() {
+                self.check_type_compatibility(
+                    expected,
+                    actual,
+                    argument.span,
+                    &format!(
+                        "Invalid argument {} for '{}': expected '{}', got '{}'",
+                        index + 1,
+                        function_name,
+                        expected,
+                        actual
+                    ),
+                );
+            }
+        }
+    }
+
+    fn check_type_compatibility(
+        &mut self,
+        expected: &HirType,
+        actual: &HirType,
+        span: SourceSpan,
+        message: &str,
+    ) {
+        if !Self::types_compatible(expected, actual) {
+            self.errors
+                .push(format!("{} at {}..{}", message, span.start(), span.end()));
+        }
+    }
+
+    fn types_compatible(expected: &HirType, actual: &HirType) -> bool {
+        expected == actual
+            || matches!(expected, HirType::Any | HirType::Unknown)
+            || matches!(actual, HirType::Any | HirType::Unknown)
+            || matches!((expected, actual), (HirType::Number, HirType::Integer))
     }
 
     fn recognize_builtin(&self, name: &str) -> Option<HirBuiltinFunction> {
@@ -1037,6 +1411,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::lexer::{Lexer, TokenKind};
+    use crate::parser::ast_builder::AstNode;
     use crate::parser::Parser;
     use crate::source::SourceManager;
 
@@ -1047,6 +1422,16 @@ mod tests {
     }
 
     fn lower_source_result(source: &str) -> Result<HirModule, HirError> {
+        let ast = parse_source(source);
+        HirBuilder::new().build(&ast)
+    }
+
+    fn lower_stage_result(source: &str) -> Result<HirModule, HirError> {
+        let ast = parse_source(source);
+        crate::hir::HirStage::lower(&ast)
+    }
+
+    fn parse_source(source: &str) -> AstNode {
         let mut sources = SourceManager::new();
         let file_id = sources.add_file(PathBuf::from("test.glu"), source.to_string());
         let file = sources.get(file_id).unwrap();
@@ -1063,8 +1448,146 @@ mod tests {
         }
 
         let mut parser = Parser::new(&tokens);
-        let ast = parser.parse_program();
-        HirBuilder::new().build(&ast)
+        parser.parse_program()
+    }
+
+    fn assert_expressions_are_typed(statements: &[HirStatement]) {
+        for statement in statements {
+            match &statement.kind {
+                HirStatementKind::LocalVariable { initializer, .. } => {
+                    if let Some(initializer) = initializer {
+                        assert_expression_is_typed(initializer);
+                    }
+                }
+                HirStatementKind::Assignment { targets, values } => {
+                    for expression in targets.iter().chain(values.iter()) {
+                        assert_expression_is_typed(expression);
+                    }
+                }
+                HirStatementKind::Expression(expression) => assert_expression_is_typed(expression),
+                HirStatementKind::Return(Some(values)) => {
+                    for expression in values {
+                        assert_expression_is_typed(expression);
+                    }
+                }
+                HirStatementKind::Block(statements)
+                | HirStatementKind::While {
+                    body: statements, ..
+                }
+                | HirStatementKind::RepeatUntil {
+                    body: statements, ..
+                } => assert_expressions_are_typed(statements),
+                HirStatementKind::If {
+                    condition,
+                    then_block,
+                    else_block,
+                } => {
+                    assert_expression_is_typed(condition);
+                    assert_expressions_are_typed(then_block);
+                    if let Some(else_block) = else_block {
+                        assert_expressions_are_typed(else_block);
+                    }
+                }
+                HirStatementKind::ForNumeric {
+                    start,
+                    end,
+                    step,
+                    body,
+                    ..
+                } => {
+                    assert_expression_is_typed(start);
+                    assert_expression_is_typed(end);
+                    if let Some(step) = step {
+                        assert_expression_is_typed(step);
+                    }
+                    assert_expressions_are_typed(body);
+                }
+                HirStatementKind::ForGeneric {
+                    iterables, body, ..
+                } => {
+                    for expression in iterables {
+                        assert_expression_is_typed(expression);
+                    }
+                    assert_expressions_are_typed(body);
+                }
+                HirStatementKind::Return(None)
+                | HirStatementKind::Function { .. }
+                | HirStatementKind::Break
+                | HirStatementKind::Continue
+                | HirStatementKind::Error => {}
+            }
+        }
+    }
+
+    fn assert_expression_is_typed(expression: &HirExpression) {
+        assert!(
+            expression.expr_type.is_some(),
+            "expected typed expression: {:?}",
+            expression.kind
+        );
+
+        match &expression.kind {
+            HirExpressionKind::Unary { operand, .. } => assert_expression_is_typed(operand),
+            HirExpressionKind::Binary { left, right, .. } => {
+                assert_expression_is_typed(left);
+                assert_expression_is_typed(right);
+            }
+            HirExpressionKind::TableConstructor(fields) => {
+                for field in fields {
+                    match field {
+                        HirTableField::Named { value, .. } => assert_expression_is_typed(value),
+                        HirTableField::Indexed { key, value } => {
+                            assert_expression_is_typed(key);
+                            assert_expression_is_typed(value);
+                        }
+                        HirTableField::Expression(expression) => {
+                            assert_expression_is_typed(expression);
+                        }
+                    }
+                }
+            }
+            HirExpressionKind::Index { object, index } => {
+                assert_expression_is_typed(object);
+                assert_expression_is_typed(index);
+            }
+            HirExpressionKind::FieldAccess { object, .. } => assert_expression_is_typed(object),
+            HirExpressionKind::FunctionCall { callee, arguments } => {
+                assert_expression_is_typed(callee);
+                for argument in arguments {
+                    assert_expression_is_typed(argument);
+                }
+            }
+            HirExpressionKind::MethodCall {
+                receiver,
+                arguments,
+                ..
+            } => {
+                assert_expression_is_typed(receiver);
+                for argument in arguments {
+                    assert_expression_is_typed(argument);
+                }
+            }
+            HirExpressionKind::InterpolatedString(parts) => {
+                for part in parts {
+                    if let HirInterpolatedStringPart::Expression(expression) = part {
+                        assert_expression_is_typed(expression);
+                    }
+                }
+            }
+            HirExpressionKind::BuiltinCall { arguments, .. } => {
+                for argument in arguments {
+                    assert_expression_is_typed(argument);
+                }
+            }
+            HirExpressionKind::Nil
+            | HirExpressionKind::Boolean(_)
+            | HirExpressionKind::Number(_)
+            | HirExpressionKind::String(_)
+            | HirExpressionKind::LocalVariable(_)
+            | HirExpressionKind::GlobalVariable(_)
+            | HirExpressionKind::ClosurePlaceholder
+            | HirExpressionKind::Error => {}
+        }
     }
 
     #[test]
@@ -1082,7 +1605,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(local_symbol.kind, HirSymbolKind::Local);
-        assert_eq!(local_symbol.value_type, Some(HirType::Number));
+        assert_eq!(local_symbol.value_type, Some(HirType::Integer));
         assert_eq!(main.local_variables.len(), 1);
 
         let HirStatementKind::Expression(expression) = &main.body[1].kind else {
@@ -1097,7 +1620,7 @@ mod tests {
             HirExpressionKind::LocalVariable(_)
         ));
         assert_eq!(arguments[0].symbol_id, Some(local_symbol.id));
-        assert_eq!(arguments[0].expr_type, Some(HirType::Number));
+        assert_eq!(arguments[0].expr_type, Some(HirType::Integer));
     }
 
     #[test]
@@ -1123,6 +1646,96 @@ mod tests {
         assert_eq!(left.symbol_id, Some(function.parameters[0].symbol_id));
         assert_eq!(right.symbol_id, Some(function.parameters[0].symbol_id));
         assert_eq!(values[0].expr_type, Some(HirType::Number));
+    }
+
+    #[test]
+    fn stores_complete_function_signatures() {
+        let module = lower_source("function square(x: integer): number\nreturn x + 1.5\nend");
+        let function = module
+            .functions
+            .iter()
+            .find(|function| function.name == "square")
+            .unwrap();
+        let symbol = module
+            .symbols
+            .iter()
+            .find(|symbol| symbol.id == function.symbol_id)
+            .unwrap();
+
+        assert_eq!(function.signature.parameter_types, vec![HirType::Integer]);
+        assert_eq!(function.signature.return_type, HirType::Number);
+        assert_eq!(
+            function.signature.calling_convention,
+            HirCallingConvention::GraduaLuau
+        );
+        assert_eq!(
+            symbol.function_signature.as_ref().unwrap().return_type,
+            HirType::Number
+        );
+    }
+
+    #[test]
+    fn every_lowered_expression_has_a_type() {
+        let module = lower_source(
+            "function f(x: integer): string\nlocal y = x + 1\nreturn tostring(y)\nend\nprint(f(1))",
+        );
+
+        for function in &module.functions {
+            assert!(function.return_type.is_some());
+            assert_expressions_are_typed(&function.body);
+        }
+    }
+
+    #[test]
+    fn builtins_expose_known_result_types() {
+        let module = lower_source("local text = tostring(5)\nprint(text)");
+        let main = module
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let HirStatementKind::LocalVariable {
+            variable,
+            initializer: Some(initializer),
+        } = &main.body[0].kind
+        else {
+            panic!("expected local initialized from tostring");
+        };
+        let HirStatementKind::Expression(print_expression) = &main.body[1].kind else {
+            panic!("expected print expression");
+        };
+
+        assert_eq!(variable.var_type, Some(HirType::String));
+        assert_eq!(initializer.expr_type, Some(HirType::String));
+        assert_eq!(print_expression.expr_type, Some(HirType::Nil));
+    }
+
+    #[test]
+    fn reports_local_type_mismatch_diagnostics() {
+        let error = lower_source_result("local x: number = \"hello\"").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Cannot assign value of type 'string' to variable 'x'"));
+    }
+
+    #[test]
+    fn reports_invalid_builtin_argument_types() {
+        let error = lower_source_result("require(5)").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Invalid argument 1 for 'require': expected 'string', got 'integer'"));
+    }
+
+    #[test]
+    fn reports_return_type_mismatch_diagnostics() {
+        let error = lower_stage_result("function f(): string\nreturn 1\nend").unwrap_err();
+        assert!(error.to_string().contains("HIR validation failed"));
+    }
+
+    #[test]
+    fn reports_unknown_type_diagnostics() {
+        let error = lower_source_result("local value: Missing = 1").unwrap_err();
+        assert!(error.to_string().contains("Unknown type 'Missing'"));
     }
 
     #[test]
