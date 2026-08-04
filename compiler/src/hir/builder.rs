@@ -4,10 +4,12 @@ use crate::parser::ast_builder::AstNode;
 use crate::source::SourceSpan;
 
 use super::error::HirError;
-use super::expression::{HirExpression, HirExpressionKind, HirTableField};
+use super::expression::{
+    HirExpression, HirExpressionKind, HirInterpolatedStringPart, HirTableField,
+};
 use super::function::{HirFunction, HirFunctionMetadata, HirParameter};
 use super::ids::{HirFunctionId, HirScopeId, HirSymbolId, HirVariableId};
-use super::module::HirModule;
+use super::module::{HirModule, HirTypeAlias};
 use super::statement::{HirLocalVariable, HirStatement, HirStatementKind};
 use super::symbol::{HirScope, HirSymbol, HirSymbolKind};
 use super::types::{HirBinaryOperator, HirBuiltinFunction, HirType, HirUnaryOperator};
@@ -109,6 +111,10 @@ impl HirBuilder {
         entry_statements: &mut Vec<HirStatement>,
     ) -> Result<(), HirError> {
         match &stmt.kind {
+            crate::parser::ast_builder::StatementKind::TypeAlias { name, alias } => {
+                let type_alias = self.lower_type_alias(name, alias, stmt.span);
+                module.type_aliases.push(type_alias);
+            }
             crate::parser::ast_builder::StatementKind::Function {
                 name,
                 receiver,
@@ -138,6 +144,29 @@ impl HirBuilder {
         }
 
         Ok(())
+    }
+
+    fn lower_type_alias(
+        &mut self,
+        name: &str,
+        alias: &crate::parser::ast_builder::TypeExpression,
+        span: SourceSpan,
+    ) -> HirTypeAlias {
+        let alias_type = self.lower_type(alias);
+        let symbol_id = self.declare_symbol(
+            name.to_string(),
+            HirSymbolKind::Type,
+            Some(alias_type.clone()),
+            span,
+        );
+
+        HirTypeAlias {
+            symbol_id,
+            name: name.to_string(),
+            alias: alias_type,
+            scope_id: self.current_scope_id(),
+            span,
+        }
     }
 
     fn lower_function(
@@ -229,40 +258,7 @@ impl HirBuilder {
             crate::parser::ast_builder::StatementKind::Local {
                 names,
                 initializers,
-            } => {
-                let initializer = initializers.first().map(|expr| self.lower_expression(expr));
-                let declared_type = names
-                    .first()
-                    .and_then(|(_, typ)| typ.as_ref())
-                    .map(|typ| self.lower_type(typ));
-                let inferred_type = declared_type
-                    .clone()
-                    .or_else(|| initializer.as_ref().and_then(|expr| expr.expr_type.clone()));
-                let variable_id = self.next_variable_id();
-                let name = names
-                    .first()
-                    .map(|(name, _)| name.clone())
-                    .unwrap_or_else(|| "_".to_string());
-                let symbol_id = self.declare_variable_symbol(
-                    name.clone(),
-                    variable_id,
-                    HirSymbolKind::Local,
-                    inferred_type.clone(),
-                    stmt.span,
-                );
-                let variable = HirLocalVariable {
-                    id: variable_id,
-                    symbol_id,
-                    name,
-                    var_type: inferred_type,
-                    scope_id: self.current_scope_id(),
-                    span: stmt.span,
-                };
-                HirStatementKind::LocalVariable {
-                    variable,
-                    initializer,
-                }
-            }
+            } => return self.lower_local_statement(names, initializers, stmt.span),
             crate::parser::ast_builder::StatementKind::Assignment {
                 targets,
                 values,
@@ -281,7 +277,24 @@ impl HirBuilder {
                     values: lowered_values,
                 }
             }
-            crate::parser::ast_builder::StatementKind::Function { .. } => HirStatementKind::Error,
+            crate::parser::ast_builder::StatementKind::Function {
+                name,
+                receiver,
+                params,
+                return_type,
+                body,
+                is_local,
+            } => HirStatementKind::Function {
+                function: self.lower_function(
+                    name,
+                    receiver,
+                    params,
+                    return_type,
+                    body,
+                    *is_local,
+                    stmt.span,
+                )?,
+            },
             crate::parser::ast_builder::StatementKind::TypeAlias { .. } => {
                 HirStatementKind::Block(Vec::new())
             }
@@ -292,6 +305,60 @@ impl HirBuilder {
             kind,
             span: stmt.span,
         })
+    }
+
+    fn lower_local_statement(
+        &mut self,
+        names: &[(String, Option<crate::parser::ast_builder::TypeExpression>)],
+        initializers: &[crate::parser::ast_builder::Expression],
+        span: SourceSpan,
+    ) -> Result<HirStatement, HirError> {
+        let lowered_initializers: Vec<HirExpression> = initializers
+            .iter()
+            .map(|expr| self.lower_expression(expr))
+            .collect();
+        let mut statements = Vec::new();
+
+        for (index, (name, annotation)) in names.iter().enumerate() {
+            let initializer = lowered_initializers.get(index).cloned();
+            let declared_type = annotation.as_ref().map(|typ| self.lower_type(typ));
+            let inferred_type = declared_type
+                .clone()
+                .or_else(|| initializer.as_ref().and_then(|expr| expr.expr_type.clone()));
+            let variable_id = self.next_variable_id();
+            let symbol_id = self.declare_variable_symbol(
+                name.clone(),
+                variable_id,
+                HirSymbolKind::Local,
+                inferred_type.clone(),
+                span,
+            );
+            let variable = HirLocalVariable {
+                id: variable_id,
+                symbol_id,
+                name: name.clone(),
+                var_type: inferred_type,
+                scope_id: self.current_scope_id(),
+                span,
+            };
+
+            statements.push(HirStatement {
+                kind: HirStatementKind::LocalVariable {
+                    variable,
+                    initializer,
+                },
+                span,
+            });
+        }
+
+        if statements.len() == 1 {
+            Ok(statements.remove(0))
+        } else {
+            Ok(HirStatement {
+                kind: HirStatementKind::Block(statements),
+                span,
+            })
+        }
     }
 
     fn lower_expression(&mut self, expr: &crate::parser::ast_builder::Expression) -> HirExpression {
@@ -472,20 +539,19 @@ impl HirBuilder {
                 )
             }
             crate::parser::ast_builder::ExpressionKind::InterpolatedString(parts) => {
-                let mut result = String::new();
-                for part in parts {
-                    match part {
+                let lowered_parts = parts
+                    .iter()
+                    .map(|part| match part {
                         crate::parser::ast_builder::InterpolatedStringPart::Text(text) => {
-                            result.push_str(text)
+                            HirInterpolatedStringPart::Text(text.clone())
                         }
-                        crate::parser::ast_builder::InterpolatedStringPart::Expression(_) => {
-                            result.push('?')
+                        crate::parser::ast_builder::InterpolatedStringPart::Expression(expr) => {
+                            HirInterpolatedStringPart::Expression(self.lower_expression(expr))
                         }
-                    }
-                }
-
+                    })
+                    .collect();
                 self.expression(
-                    HirExpressionKind::String(result),
+                    HirExpressionKind::InterpolatedString(lowered_parts),
                     Some(HirType::String),
                     None,
                     expr.span,
@@ -742,7 +808,28 @@ impl HirBuilder {
                 "any" => HirType::Any,
                 _ => HirType::Unknown,
             },
-            _ => HirType::Unknown,
+            crate::parser::ast_builder::TypeExpressionKind::Optional(inner)
+            | crate::parser::ast_builder::TypeExpressionKind::Variadic(inner)
+            | crate::parser::ast_builder::TypeExpressionKind::Parenthesized(inner) => {
+                self.lower_type(inner)
+            }
+            crate::parser::ast_builder::TypeExpressionKind::Array(_)
+            | crate::parser::ast_builder::TypeExpressionKind::Table(_) => HirType::Table,
+            crate::parser::ast_builder::TypeExpressionKind::Function { .. } => HirType::Function,
+            crate::parser::ast_builder::TypeExpressionKind::Union(types)
+            | crate::parser::ast_builder::TypeExpressionKind::Intersection(types) => {
+                let mut lowered = types.iter().map(|typ| self.lower_type(typ));
+                if let Some(first) = lowered.next() {
+                    if lowered.all(|typ| typ == first) {
+                        first
+                    } else {
+                        HirType::Unknown
+                    }
+                } else {
+                    HirType::Unknown
+                }
+            }
+            crate::parser::ast_builder::TypeExpressionKind::Tuple(_) => HirType::Unknown,
         }
     }
 
@@ -911,5 +998,70 @@ mod tests {
         assert_eq!(left.symbol_id, Some(function.parameters[0].symbol_id));
         assert_eq!(right.symbol_id, Some(function.parameters[0].symbol_id));
         assert_eq!(values[0].expr_type, Some(HirType::Number));
+    }
+
+    #[test]
+    fn lowers_every_name_in_multi_local_declarations() {
+        let module = lower_source("local x, y = 1, 2\nprint(y)");
+        let main = module
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+
+        assert_eq!(main.local_variables.len(), 2);
+        assert!(module.symbols.iter().any(|symbol| symbol.name == "x"));
+        assert!(module.symbols.iter().any(|symbol| symbol.name == "y"));
+        assert!(matches!(main.body[0].kind, HirStatementKind::Block(_)));
+    }
+
+    #[test]
+    fn lowers_nested_function_statements_recursively() {
+        let module =
+            lower_source("function outer()\nfunction inner()\nreturn 1\nend\nreturn inner()\nend");
+        let outer = module
+            .functions
+            .iter()
+            .find(|function| function.name == "outer")
+            .unwrap();
+
+        assert!(matches!(
+            outer.body[0].kind,
+            HirStatementKind::Function { ref function } if function.name == "inner"
+        ));
+    }
+
+    #[test]
+    fn lowers_type_aliases_into_module_metadata() {
+        let module = lower_source("type Score = number\nlocal score: Score = 95");
+
+        assert_eq!(module.type_aliases.len(), 1);
+        assert_eq!(module.type_aliases[0].name, "Score");
+        assert_eq!(module.type_aliases[0].alias, HirType::Number);
+        assert!(module
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "Score" && symbol.kind == HirSymbolKind::Type));
+    }
+
+    #[test]
+    fn preserves_interpolated_string_parts() {
+        let module = lower_source("local x = 5\nprint(`value {x}`)");
+        let main = module
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        let HirStatementKind::Expression(expression) = &main.body[1].kind else {
+            panic!("expected print expression");
+        };
+        let HirExpressionKind::BuiltinCall { arguments, .. } = &expression.kind else {
+            panic!("expected builtin call");
+        };
+
+        assert!(matches!(
+            arguments[0].kind,
+            HirExpressionKind::InterpolatedString(_)
+        ));
     }
 }

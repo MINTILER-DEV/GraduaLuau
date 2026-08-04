@@ -61,6 +61,8 @@ pub enum HirExpressionKind {
     // The actual function will be stored separately
     ClosurePlaceholder,
 
+    InterpolatedString(Vec<HirInterpolatedStringPart>),
+
     // Built-in functions
     BuiltinCall {
         function: HirBuiltinFunction,
@@ -81,5 +83,11 @@ pub enum HirTableField {
         key: HirExpression,
         value: HirExpression,
     },
+    Expression(HirExpression),
+}
+
+#[derive(Debug, Clone)]
+pub enum HirInterpolatedStringPart {
+    Text(String),
     Expression(HirExpression),
 }

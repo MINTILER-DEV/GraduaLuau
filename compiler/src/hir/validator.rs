@@ -1,10 +1,11 @@
 use std::collections::HashSet;
 
-use super::expression::{HirExpression, HirExpressionKind, HirTableField};
+use super::expression::{
+    HirExpression, HirExpressionKind, HirInterpolatedStringPart, HirTableField,
+};
 use super::function::HirFunction;
 use super::ids::{HirScopeId, HirSymbolId};
-use super::module::HirGlobalVariable;
-use super::module::HirModule;
+use super::module::{HirGlobalVariable, HirModule, HirTypeAlias};
 use super::statement::{HirStatement, HirStatementKind};
 use super::types::HirType;
 use crate::source::SourceSpan;
@@ -71,6 +72,10 @@ impl HirValidator {
         for global in &module.global_variables {
             self.validate_global_variable(global);
         }
+
+        for type_alias in &module.type_aliases {
+            self.validate_type_alias(type_alias);
+        }
     }
 
     fn validate_function(&mut self, function: &HirFunction) {
@@ -102,6 +107,11 @@ impl HirValidator {
         if let Some(initializer) = &global.initializer {
             self.validate_expression(initializer);
         }
+    }
+
+    fn validate_type_alias(&mut self, type_alias: &HirTypeAlias) {
+        self.validate_symbol_id(type_alias.symbol_id, type_alias.span, "type alias symbol");
+        self.validate_scope_id(type_alias.scope_id, type_alias.span, "type alias scope");
     }
 
     fn validate_statement(&mut self, statement: &HirStatement) {
@@ -282,6 +292,13 @@ impl HirValidator {
             HirExpressionKind::ClosurePlaceholder => {
                 // Closures are stored separately to avoid circular dependencies
                 // Validation would need to be done on the actual function storage
+            }
+            HirExpressionKind::InterpolatedString(parts) => {
+                for part in parts {
+                    if let HirInterpolatedStringPart::Expression(expr) = part {
+                        self.validate_expression(expr);
+                    }
+                }
             }
             HirExpressionKind::BuiltinCall {
                 arguments,

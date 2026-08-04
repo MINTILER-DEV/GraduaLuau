@@ -19,10 +19,10 @@ pub mod validator;
 // Re-export commonly used types for convenience
 pub use builder::HirBuilder;
 pub use error::HirError;
-pub use expression::{HirExpression, HirExpressionKind, HirTableField};
+pub use expression::{HirExpression, HirExpressionKind, HirInterpolatedStringPart, HirTableField};
 pub use function::{HirFunction, HirParameter};
 pub use ids::{HirFunctionId, HirScopeId, HirSymbolId, HirVariableId};
-pub use module::{HirGlobalVariable, HirModule};
+pub use module::{HirGlobalVariable, HirModule, HirTypeAlias};
 pub use printer::HirPrinter;
 pub use statement::{HirLocalVariable, HirStatement, HirStatementKind};
 pub use symbol::{HirScope, HirSymbol, HirSymbolKind};

@@ -1,7 +1,8 @@
-use super::expression::{HirExpression, HirExpressionKind, HirTableField};
+use super::expression::{
+    HirExpression, HirExpressionKind, HirInterpolatedStringPart, HirTableField,
+};
 use super::function::HirFunction;
-use super::module::HirGlobalVariable;
-use super::module::HirModule;
+use super::module::{HirGlobalVariable, HirModule, HirTypeAlias};
 use super::statement::{HirStatement, HirStatementKind};
 use super::types::{HirBinaryOperator, HirUnaryOperator};
 
@@ -65,6 +66,16 @@ impl HirPrinter {
             self.indent -= 2;
         }
 
+        if !module.type_aliases.is_empty() {
+            output.push_str(&self.indent_str());
+            output.push_str("Types:\n");
+            self.indent += 2;
+            for type_alias in &module.type_aliases {
+                output.push_str(&self.print_type_alias(type_alias));
+            }
+            self.indent -= 2;
+        }
+
         // Print functions
         if !module.functions.is_empty() {
             output.push_str(&self.indent_str());
@@ -77,6 +88,16 @@ impl HirPrinter {
         }
 
         self.indent -= 2;
+        output
+    }
+
+    fn print_type_alias(&mut self, type_alias: &HirTypeAlias) -> String {
+        let mut output = String::new();
+        output.push_str(&self.indent_str());
+        output.push_str(&format!(
+            "Type Alias: {} symbol=#{} scope=#{} alias={:?}\n",
+            type_alias.name, type_alias.symbol_id.0, type_alias.scope_id.0, type_alias.alias
+        ));
         output
     }
 
@@ -394,6 +415,18 @@ impl HirPrinter {
                 )
             }
             HirExpressionKind::ClosurePlaceholder => "<closure>".to_string(),
+            HirExpressionKind::InterpolatedString(parts) => {
+                let part_strs: Vec<String> = parts
+                    .iter()
+                    .map(|part| match part {
+                        HirInterpolatedStringPart::Text(text) => format!("text({:?})", text),
+                        HirInterpolatedStringPart::Expression(expr) => {
+                            format!("expr({})", self.print_expression(expr))
+                        }
+                    })
+                    .collect();
+                format!("interpolated({})", part_strs.join(", "))
+            }
             HirExpressionKind::BuiltinCall {
                 function,
                 arguments,
