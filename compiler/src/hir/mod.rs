@@ -10,6 +10,7 @@ pub mod expression;
 pub mod function;
 pub mod ids;
 pub mod module;
+pub mod optimizer;
 pub mod printer;
 pub mod statement;
 pub mod symbol;
@@ -23,6 +24,7 @@ pub use expression::{HirExpression, HirExpressionKind, HirInterpolatedStringPart
 pub use function::{HirFunction, HirParameter};
 pub use ids::{HirFunctionId, HirScopeId, HirSymbolId, HirVariableId};
 pub use module::{HirGlobalVariable, HirModule, HirTypeAlias};
+pub use optimizer::{HirOptimizationResult, HirOptimizationStats, HirOptimizer};
 pub use printer::HirPrinter;
 pub use statement::{HirLocalVariable, HirStatement, HirStatementKind};
 pub use symbol::{HirScope, HirScopeKind, HirSymbol, HirSymbolKind};
@@ -39,18 +41,28 @@ pub struct HirStage;
 
 impl HirStage {
     pub fn lower(ast: &AstNode) -> Result<HirModule, HirError> {
-        let mut builder = HirBuilder::new();
-        let module = builder.build(ast)?;
+        Self::lower_with_optimization(ast).map(|result| result.module)
+    }
 
-        // Validate the generated HIR
+    pub fn lower_unoptimized(ast: &AstNode) -> Result<HirModule, HirError> {
+        let mut builder = HirBuilder::new();
+        builder.build(ast)
+    }
+
+    pub fn lower_with_optimization(ast: &AstNode) -> Result<HirOptimizationResult, HirError> {
+        let module = Self::lower_unoptimized(ast)?;
+        // Optimize and validate the generated HIR before MIR lowering.
+        let mut optimizer = HirOptimizer::new();
+        let optimized = optimizer.optimize(&module);
+
         let mut validator = HirValidator::new();
-        if let Err(validation_errors) = validator.validate(&module) {
+        if let Err(validation_errors) = validator.validate(&optimized.module) {
             return Err(HirError::LoweringError(format!(
                 "HIR validation failed with {} errors",
                 validation_errors.len()
             )));
         }
 
-        Ok(module)
+        Ok(optimized)
     }
 }

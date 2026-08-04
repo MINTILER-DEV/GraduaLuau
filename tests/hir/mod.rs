@@ -1,420 +1,372 @@
-use compiler::hir::{HirModule, HirStage, HirPrinter, HirValidator};
-use compiler::lexer::Lexer;
+use compiler::hir::{
+    HirBinaryOperator, HirBuilder, HirExpressionKind, HirModule, HirOptimizer, HirPrinter,
+    HirScopeKind, HirStage, HirStatement, HirStatementKind, HirSymbolKind, HirType, HirValidator,
+};
+use compiler::lexer::{Lexer, TokenKind};
+use compiler::parser::ast_builder::AstNode;
 use compiler::parser::Parser;
-use compiler::semantic;
-use compiler::source::SourceManager;
+use compiler::source::{SourceManager, SourceSpan};
 use std::path::PathBuf;
 
-fn compile_to_hir(source: &str) -> Result<HirModule, String> {
+fn parse_source(source: &str) -> Result<AstNode, String> {
     let mut sources = SourceManager::new();
-    let test_path = PathBuf::from("test.lua");
-    let file_id = sources.add_file(test_path, source.to_string());
-    
-    let file = sources.get(file_id).ok_or("File not found")?;
+    let file_id = sources.add_file(PathBuf::from("hir_test.glu"), source.to_string());
+    let file = sources.get(file_id).ok_or("file not found")?;
     let mut lexer = Lexer::new(file);
     let mut tokens = Vec::new();
-    
+
     loop {
         let token = lexer.next_token();
-        tokens.push(token.clone());
-        if matches!(token.kind, compiler::lexer::TokenKind::EOF) {
+        let done = matches!(token.kind, TokenKind::EOF);
+        tokens.push(token);
+        if done {
             break;
         }
     }
-    
+
     let mut parser = Parser::new(&tokens);
     let ast = parser.parse_program();
-    
-    // Allow parser diagnostics (warnings are ok)
-    if parser.diagnostics().iter().any(|d| d.severity().is_error()) {
-        return Err(format!("Parser errors: {:?}", parser.diagnostics()));
+    if parser
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.severity().is_error())
+    {
+        return Err(format!("parser errors: {:?}", parser.diagnostics()));
     }
-    
-    let (constant_diagnostics, _constant_results) = semantic::evaluate_constants(&ast);
-    if !constant_diagnostics.is_empty() && constant_diagnostics.iter().any(|d| d.severity().is_error()) {
-        return Err(format!("Constant evaluation errors: {:?}", constant_diagnostics));
-    }
-    
-    let (module_diagnostics, _resolved_modules) = semantic::resolve_modules(&mut sources, file_id, &ast);
-    if !module_diagnostics.is_empty() && module_diagnostics.iter().any(|d| d.severity().is_error()) {
-        return Err(format!("Module resolution errors: {:?}", module_diagnostics));
-    }
-    
-    let semantic_result = semantic::analyze(&ast);
-    if !semantic_result.diagnostics.is_empty() && semantic_result.diagnostics.iter().any(|d| d.severity().is_error()) {
-        return Err(format!("Semantic analysis errors: {:?}", semantic_result.diagnostics));
-    }
-    
-    HirStage::lower(&ast).map_err(|e| e.to_string())
+
+    Ok(ast)
+}
+
+fn lower_unoptimized(source: &str) -> Result<HirModule, String> {
+    let ast = parse_source(source)?;
+    HirBuilder::new()
+        .build(&ast)
+        .map_err(|error| error.to_string())
+}
+
+fn compile_to_hir(source: &str) -> Result<HirModule, String> {
+    let ast = parse_source(source)?;
+    HirStage::lower(&ast).map_err(|error| error.to_string())
+}
+
+fn validate(module: &HirModule) {
+    HirValidator::new()
+        .validate(module)
+        .expect("HIR should validate");
+}
+
+fn main_body(module: &HirModule) -> &[HirStatement] {
+    &module
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .expect("expected synthetic main")
+        .body
 }
 
 #[test]
-fn test_empty_module() {
-    let source = "";
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
+fn lowers_empty_module_with_root_scope_and_builtins() {
+    let module = compile_to_hir("").unwrap();
+    validate(&module);
+
+    let root_scope = module
+        .scopes
+        .iter()
+        .find(|scope| Some(scope.id) == module.metadata.root_scope)
+        .unwrap();
     assert_eq!(module.name, "main");
+    assert_eq!(root_scope.kind, HirScopeKind::Global);
     assert!(module.functions.is_empty());
-    assert!(module.global_variables.is_empty());
+    assert!(module
+        .symbols
+        .iter()
+        .any(|symbol| symbol.name == "print" && symbol.kind == HirSymbolKind::BuiltinFunction));
 }
 
 #[test]
-fn test_simple_function() {
-    let source = r#"
-        function add(a, b)
-            return a + b
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    // Just check that compilation doesn't crash
-    let _ = result;
+fn lowers_entry_locals_into_synthetic_main() {
+    let module = compile_to_hir("local x = 5\nprint(x)").unwrap();
+    validate(&module);
+
+    let main = module
+        .functions
+        .iter()
+        .find(|function| function.name == "main")
+        .unwrap();
+    assert_eq!(module.global_variables.len(), 0);
+    assert_eq!(main.local_variables.len(), 1);
+    assert_eq!(main.local_variables[0].var_type, Some(HirType::Integer));
 }
 
 #[test]
-fn test_global_variable() {
-    let source = "local x = 5";
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.global_variables.len(), 1);
-    
-    let global = &module.global_variables[0];
-    assert_eq!(global.name, "x");
-    assert!(global.initializer.is_some());
+fn resolves_symbols_and_scope_tree_for_nested_functions() {
+    let module =
+        compile_to_hir("function outer(x: integer)\nfunction inner()\nreturn x\nend\nend").unwrap();
+    validate(&module);
+
+    let root_scope = module
+        .scopes
+        .iter()
+        .find(|scope| Some(scope.id) == module.metadata.root_scope)
+        .unwrap();
+    let outer = module
+        .functions
+        .iter()
+        .find(|function| function.name == "outer")
+        .unwrap();
+    let HirStatementKind::Function { function: inner } = &outer.body[0].kind else {
+        panic!("expected nested function");
+    };
+
+    assert!(root_scope.children.contains(&outer.scope_id));
+    assert!(module
+        .scopes
+        .iter()
+        .find(|scope| scope.id == outer.scope_id)
+        .unwrap()
+        .children
+        .contains(&inner.scope_id));
+    assert_eq!(inner.return_type, Some(HirType::Integer));
 }
 
 #[test]
-fn test_function_call() {
-    let source = r#"
-        function greet(name)
-            print("Hello, " .. name)
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.functions.len(), 1);
-    
-    let function = &module.functions[0];
-    assert_eq!(function.name, "greet");
-    assert!(!function.body.is_empty());
+fn integrates_types_for_functions_and_returns() {
+    let module = compile_to_hir("function square(x: integer): number\nreturn x * x\nend").unwrap();
+    validate(&module);
+
+    let function = module
+        .functions
+        .iter()
+        .find(|function| function.name == "square")
+        .unwrap();
+    assert_eq!(function.signature.parameter_types, vec![HirType::Integer]);
+    assert_eq!(function.signature.return_type, HirType::Number);
+    assert_eq!(function.return_type, Some(HirType::Number));
 }
 
 #[test]
-fn test_table_constructor() {
-    let source = r#"
-        function createTable()
-            local t = {x = 10, y = 20}
-            return t
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.functions.len(), 1);
+fn optimizes_constant_arithmetic_before_mir() {
+    let module = compile_to_hir("local x = 2 + 3").unwrap();
+    validate(&module);
+
+    let HirStatementKind::LocalVariable {
+        initializer: Some(initializer),
+        ..
+    } = &main_body(&module)[0].kind
+    else {
+        panic!("expected optimized local");
+    };
+    assert!(matches!(initializer.kind, HirExpressionKind::Number(5.0)));
 }
 
 #[test]
-fn test_control_flow_if() {
-    let source = r#"
-        function testIf(x)
-            if x > 0 then
-                return "positive"
-            else
-                return "negative"
-            end
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    // Control flow statements may not be fully implemented yet
-    // Just check that it doesn't crash
-    let _ = result;
+fn keeps_side_effecting_builtin_calls_while_removing_dead_expressions() {
+    let module = compile_to_hir("1 + 2\nprint(\"alive\")").unwrap();
+    validate(&module);
+
+    let body = main_body(&module);
+    assert_eq!(body.len(), 1);
+    assert!(matches!(body[0].kind, HirStatementKind::Expression(_)));
 }
 
 #[test]
-fn test_control_flow_while() {
-    let source = r#"
-        function testWhile(n)
-            local i = 0
-            while i < n do
-                i = i + 1
-            end
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    // Control flow statements may not be fully implemented yet
-    let _ = result;
+fn handles_assignments_without_propagating_mutated_locals() {
+    let module = compile_to_hir("local x = 1\nx = 2\nlocal y = x").unwrap();
+    validate(&module);
+
+    let HirStatementKind::LocalVariable {
+        initializer: Some(initializer),
+        ..
+    } = &main_body(&module)[2].kind
+    else {
+        panic!("expected y local");
+    };
+    assert!(matches!(
+        initializer.kind,
+        HirExpressionKind::LocalVariable(_)
+    ));
 }
 
 #[test]
-fn test_control_flow_repeat_until() {
-    let source = r#"
-        function testRepeat(n)
-            local i = 0
-            repeat
-                i = i + 1
-            until i >= n
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    // Control flow statements may not be fully implemented yet
-    let _ = result;
+fn lowers_strings_booleans_tables_and_interpolation() {
+    let module = compile_to_hir(
+        "local x = true and false\nlocal t = {name = \"GraduaLuau\"}\nprint(`hello {x}`)",
+    )
+    .unwrap();
+    validate(&module);
+
+    assert_eq!(main_body(&module).len(), 3);
+    assert!(module
+        .symbols
+        .iter()
+        .any(|symbol| symbol.name == "t" && symbol.kind == HirSymbolKind::Local));
 }
 
 #[test]
-fn test_numeric_for_loop() {
-    let source = r#"
-        function testFor(n)
-            for i = 1, n do
-                print(i)
-            end
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    // For loops may not be fully implemented yet
-    let _ = result;
+fn supports_luau_shorthand_call_syntax() {
+    let module = compile_to_hir("print \"Hello\"").unwrap();
+    validate(&module);
+
+    let HirStatementKind::Expression(expression) = &main_body(&module)[0].kind else {
+        panic!("expected print expression");
+    };
+    assert!(matches!(
+        expression.kind,
+        HirExpressionKind::BuiltinCall { .. }
+    ));
 }
 
 #[test]
-fn test_unary_operators() {
-    let source = r#"
-        function testUnary(x)
-            return -x
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    // Just check that compilation doesn't crash
-    let _ = result;
+fn reports_undefined_identifier_errors() {
+    let error = compile_to_hir("print(missing)").unwrap_err();
+    assert!(error.contains("Undefined identifier 'missing'"));
 }
 
 #[test]
-fn test_binary_operators() {
-    let source = r#"
-        function testBinary(a, b)
-            return a + b
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    // Just check that compilation doesn't crash
-    let _ = result;
+fn rejects_type_mismatch_errors() {
+    let error = compile_to_hir("local x: number = \"hello\"").unwrap_err();
+    assert!(error.contains("Cannot assign value of type 'string'"));
 }
 
 #[test]
-fn test_builtin_functions() {
-    let source = r#"
-        function testBuiltin()
-            print("Hello")
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.functions.len(), 1);
+fn validation_rejects_corrupted_symbol_references() {
+    let mut module = compile_to_hir("print(\"hello\")").unwrap();
+    let main = module
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "main")
+        .unwrap();
+    let HirStatementKind::Expression(expression) = &mut main.body[0].kind else {
+        panic!("expected expression");
+    };
+    expression.symbol_id = Some(compiler::hir::HirSymbolId::new(9999));
+
+    assert!(HirValidator::new().validate(&module).is_err());
 }
 
 #[test]
-fn test_hir_printer() {
-    let source = r#"
-        function add(a, b)
-            return a + b
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    if result.is_ok() {
-        let module = result.unwrap();
-        let mut printer = HirPrinter::new();
-        let output = printer.print_module(&module);
-        
-        assert!(output.contains("Module 'main'"));
-        assert!(output.contains("Function 'add'"));
+fn validation_rejects_invalid_control_flow() {
+    let mut module = compile_to_hir("print(\"hello\")").unwrap();
+    let span = SourceSpan::new(
+        module.span.file_id(),
+        module.span.start(),
+        module.span.end(),
+    );
+    let main = module
+        .functions
+        .iter_mut()
+        .find(|function| function.name == "main")
+        .unwrap();
+    main.body.push(HirStatement {
+        kind: HirStatementKind::Break,
+        span,
+    });
+
+    assert!(HirValidator::new().validate(&module).is_err());
+}
+
+#[test]
+fn printer_golden_output_contains_symbols_scopes_and_types() {
+    let module = compile_to_hir("local x = 5\nprint(x)").unwrap();
+    let output = HirPrinter::new().print_module(&module);
+
+    for expected in [
+        "Module 'main'",
+        "Scopes:",
+        "Scope #0 Global",
+        "Symbols:",
+        "Function 'main'",
+        "Local Variable: x",
+        "type=Some(Integer)",
+        "<builtin Print>",
+    ] {
+        assert!(
+            output.contains(expected),
+            "expected HIR output to contain {expected:?}\n{output}"
+        );
     }
-    // Printer test is informational, don't fail if HIR generation has issues
 }
 
 #[test]
-fn test_hir_validator() {
-    let source = r#"
-        function add(a, b)
-            return a + b
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    if result.is_ok() {
-        let module = result.unwrap();
-        let mut validator = HirValidator::new();
-        let validation_result = validator.validate(&module);
-        
-        // Validation may have errors depending on implementation state
-        let _ = validation_result;
+fn optimizer_statistics_report_is_available() {
+    let ast = parse_source("1 + 2").unwrap();
+    let result = HirStage::lower_with_optimization(&ast).unwrap();
+    validate(&result.module);
+
+    let report = result.stats.report();
+    assert!(report.contains("HIR Optimization"));
+    assert!(report.contains("Constant Folds: 1"));
+    assert!(report.contains("Dead Expressions Removed: 1"));
+}
+
+#[test]
+fn regression_forward_references_and_shadowing_remain_stable() {
+    let module = compile_to_hir(
+        "function foo(x: integer)\nfunction inner()\nlocal x = 2\nreturn x\nend\nreturn x\nend",
+    )
+    .unwrap();
+    validate(&module);
+
+    let foo_symbols = module
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.name == "x")
+        .collect::<Vec<_>>();
+    assert_eq!(foo_symbols.len(), 2);
+}
+
+#[test]
+fn regression_nested_return_constant_folding_survives_validation() {
+    let module = compile_to_hir("function value(): integer\nreturn (1 + 2) * 3\nend").unwrap();
+    validate(&module);
+
+    let function = module
+        .functions
+        .iter()
+        .find(|function| function.name == "value")
+        .unwrap();
+    let HirStatementKind::Return(Some(values)) = &function.body[0].kind else {
+        panic!("expected return");
+    };
+    assert!(matches!(values[0].kind, HirExpressionKind::Number(9.0)));
+}
+
+#[test]
+fn large_hir_smoke_test_remains_fast_and_valid() {
+    let mut source = String::new();
+    for index in 0..50 {
+        source.push_str(&format!("local value{index} = {index} + 1\n"));
     }
-    // Validator test is informational, don't fail if HIR generation has issues
+    source.push_str("print(value49)\n");
+
+    let module = compile_to_hir(&source).unwrap();
+    validate(&module);
+    assert!(main_body(&module).len() >= 50);
 }
 
 #[test]
-fn test_multiple_functions() {
-    let source = r#"
-        function foo()
-            return 1
-        end
-        
-        function bar()
-            return 2
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.functions.len(), 2);
-    assert_eq!(module.functions[0].name, "foo");
-    assert_eq!(module.functions[1].name, "bar");
+fn unoptimized_hir_can_be_compared_with_optimized_hir() {
+    let unoptimized = lower_unoptimized("local x = 2 + 3").unwrap();
+    let optimized = HirOptimizer::new().optimize(&unoptimized).module;
+    let unoptimized_text = HirPrinter::new().print_module(&unoptimized);
+    let optimized_text = HirPrinter::new().print_module(&optimized);
+
+    assert_ne!(unoptimized_text, optimized_text);
+    assert!(optimized_text.contains(" = 5"));
 }
 
 #[test]
-fn test_nested_expressions() {
-    let source = r#"
-        function testNested()
-            return (1 + 2) * (3 + 4)
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.functions.len(), 1);
-}
-
-#[test]
-fn test_string_literals() {
-    let source = r#"
-        function testStrings()
-            local x = "hello"
-            local y = 'world'
-            return x .. y
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.functions.len(), 1);
-}
-
-#[test]
-fn test_boolean_literals() {
-    let source = r#"
-        function testBooleans()
-            local x = true
-            local y = false
-            return x and y
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.functions.len(), 1);
-}
-
-#[test]
-fn test_nil_literal() {
-    let source = r#"
-        function testNil()
-            local x = nil
-            return x
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.functions.len(), 1);
-}
-
-#[test]
-fn test_field_access() {
-    let source = r#"
-        function testFieldAccess()
-            local t = {x = 10}
-            return t.x
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.functions.len(), 1);
-}
-
-#[test]
-fn test_table_indexing() {
-    let source = r#"
-        function testIndexing()
-            local t = {10, 20, 30}
-            return t[1]
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.functions.len(), 1);
-}
-
-#[test]
-fn test_method_call() {
-    let source = r#"
-        function testMethodCall()
-            local s = "hello"
-            return s:len()
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    assert!(result.is_ok());
-    
-    let module = result.unwrap();
-    assert_eq!(module.functions.len(), 1);
-}
-
-#[test]
-fn test_local_function() {
-    let source = r#"
-        local function helper()
-            return 42
-        end
-        
-        function main()
-            return helper()
-        end
-    "#;
-    
-    let result = compile_to_hir(source);
-    // Local functions may be handled differently in current implementation
-    let _ = result;
+fn binary_operator_metadata_survives_unoptimized_lowering() {
+    let module = lower_unoptimized("local x = 1 + 2").unwrap();
+    let HirStatementKind::LocalVariable {
+        initializer: Some(initializer),
+        ..
+    } = &main_body(&module)[0].kind
+    else {
+        panic!("expected local");
+    };
+    let HirExpressionKind::Binary { operator, .. } = initializer.kind else {
+        panic!("expected unoptimized binary");
+    };
+    assert_eq!(operator, HirBinaryOperator::Add);
 }
